@@ -1,4 +1,4 @@
-# app.py  (versión estable sin SeaSurf, con truncado y logging)
+# app.py (robusto: acepta username/usuario y password/contrasena, sin SeaSurf)
 import os
 from datetime import datetime
 from io import BytesIO
@@ -33,21 +33,24 @@ class Usuario(UserMixin):
         self.role = role
 
     def check_password(self, password: str) -> bool:
-        # Truncamos a 72 bytes para evitar error de bcrypt
         try:
-            pw_bytes = password.encode("utf-8")[:72]
+            pw_bytes = (password or "").encode("utf-8")[:72]  # truncado seguro
             return bcrypt.verify(pw_bytes, self.password_hash)
         except Exception as e:
-            # Log al stdout (lo verás en Render → Logs)
-            print(f"[LOGIN verify] Error verificando hash: {e}")
+            print(f"[Usuario.check_password] Error verificando hash: {e}")
             return False
 
 @login_manager.user_loader
 def load_user(user_id):
-    with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
-        user = conn.execute("SELECT * FROM usuarios WHERE id = %s", (user_id,)).fetchone()
-        if user:
-            return Usuario(user["id"], user["username"], user["password_hash"], user["role"])
+    try:
+        with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
+            user = conn.execute(
+                "SELECT * FROM usuarios WHERE id = %s", (user_id,)
+            ).fetchone()
+            if user:
+                return Usuario(user["id"], user["username"], user["password_hash"], user["role"])
+    except Exception as e:
+        print(f"[user_loader] Error cargando user_id={user_id}: {e}")
     return None
 
 # ----------------- Rutas -----------------
@@ -58,33 +61,35 @@ def health():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
+        # Acepta name="username" o name="usuario"; password o contrasena
+        username = (request.form.get("username") or request.form.get("usuario") or "").strip()
+        password = request.form.get("password") or request.form.get("contrasena") or ""
+
         try:
-            username = request.form.get("username", "").strip()
-            password = request.form.get("password", "")
-
-            # Truncamos ANTES de verificar (coherente con check_password)
-            pw_bytes = password.encode("utf-8")[:72]
-
             with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
                 user = conn.execute(
                     "SELECT * FROM usuarios WHERE username = %s",
                     (username,)
                 ).fetchone()
 
-            if user:
-                user_obj = Usuario(user["id"], user["username"], user["password_hash"], user["role"])
-                if bcrypt.verify(pw_bytes, user["password_hash"]):
-                    login_user(user_obj)
-                    flash("Inicio de sesión exitoso.", "success")
-                    return redirect(url_for("index"))
-                else:
-                    flash("Usuario o contraseña incorrectos.", "error")
+            if not user:
+                print(f"[LOGIN] Usuario no encontrado: '{username}'")
+                flash("Usuario o contraseña incorrectos.", "error")
+                return render_template("login.html")
+
+            user_obj = Usuario(user["id"], user["username"], user["password_hash"], user["role"])
+            if user_obj.check_password(password):
+                login_user(user_obj)
+                flash("Inicio de sesión exitoso.", "success")
+                return redirect(url_for("index"))
             else:
+                print(f"[LOGIN] Password inválido para usuario: '{username}'")
                 flash("Usuario o contraseña incorrectos.", "error")
         except Exception as e:
-            # Deja rastro útil en logs para depurar
-            print(f"[LOGIN route] Excepción en POST /login: {e}")
+            # Log detallado para Render → Logs
+            print(f"[LOGIN route] Excepción en POST /login para '{username}': {e}")
             flash("Ocurrió un error interno al iniciar sesión.", "error")
+
     return render_template("login.html")
 
 @app.route("/logout")
@@ -125,7 +130,7 @@ def index():
             flash("Movimiento registrado correctamente.", "success")
             return redirect(url_for("index"))
         except Exception as e:
-            print(f"[INDEX POST] Error: {e}")
+            print(f"[INDEX POST] Error guardando movimiento: {e}")
             flash("Ocurrió un error guardando el movimiento.", "error")
 
     with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
@@ -256,4 +261,5 @@ if __name__ == "__main__":
     inicializar_bd()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
 
