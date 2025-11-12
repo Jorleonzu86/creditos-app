@@ -32,9 +32,14 @@ class Usuario(UserMixin):
         self.role = role
 
     def check_password(self, password):
-        # 🔒 Aseguramos que la contraseña no exceda los 72 bytes
-        password = password.encode("utf-8")[:72].decode("utf-8", "ignore")
-        return bcrypt.verify(password, self.password_hash)
+        # ✅ Truncar contraseñas largas a 72 bytes (límite de bcrypt)
+        if isinstance(password, str):
+            password = password.encode("utf-8")
+        password = password[:72]
+        try:
+            return bcrypt.verify(password.decode("utf-8", "ignore"), self.password_hash)
+        except Exception:
+            return False
 
 
 @login_manager.user_loader
@@ -51,19 +56,18 @@ def load_user(user_id):
 def login():
     if request.method == "POST":
         username = request.form["username"].strip()
-        password = request.form["password"]
+        password = request.form["password"].strip()
 
         with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
             user = conn.execute("SELECT * FROM usuarios WHERE username = %s", (username,)).fetchone()
 
         if user:
-            password = password.encode("utf-8")[:72].decode("utf-8", "ignore")  # ✅ Truncamos antes de verificar
-            if bcrypt.verify(password, user["password_hash"]):
-                user_obj = Usuario(user["id"], user["username"], user["password_hash"], user["role"])
+            user_obj = Usuario(user["id"], user["username"], user["password_hash"], user["role"])
+            if user_obj.check_password(password):
                 login_user(user_obj)
                 flash("Inicio de sesión exitoso.", "success")
                 return redirect(url_for("index"))
-        
+
         flash("Usuario o contraseña incorrectos.", "error")
         return redirect(url_for("login"))
 
@@ -223,4 +227,5 @@ if __name__ == "__main__":
     inicializar_bd()
     from waitress import serve
     serve(app, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+
 
