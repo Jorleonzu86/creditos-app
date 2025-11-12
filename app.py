@@ -1,39 +1,39 @@
-import os
-from flask import Flask, render_template, request, redirect, url_for, flash
-from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+# app.py
+from flask import (
+    Flask, render_template, request, redirect, url_for, flash, send_file
+)
+from flask_login import (
+    LoginManager, login_user, logout_user, login_required, UserMixin
+)
 from passlib.hash import bcrypt
+from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from datetime import datetime
 import psycopg
 from psycopg.rows import dict_row
-from flask_talisman import Talisman
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from flask_seasurf import SeaSurf
-from dotenv import load_dotenv
+import os
 
-# ----------------------------
-# Configuración inicial
-# ----------------------------
-load_dotenv()
-
+# ============================================================
+# CONFIGURACIÓN PRINCIPAL
+# ============================================================
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "secret_key")
+app.secret_key = os.getenv("SECRET_KEY", "clave-super-segura")
 
-# Seguridad y rate limiting
-Talisman(app, content_security_policy=None)
-csrf = SeaSurf(app)
-limiter = Limiter(get_remote_address, app=app)
-
-# Configuración de base de datos (Neon o local)
 DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("⚠️ No se encontró DATABASE_URL en las variables de entorno.")
 
-# ----------------------------
-# Flask-Login setup
-# ----------------------------
+# ============================================================
+# LOGIN MANAGER
+# ============================================================
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
 
-
+# ============================================================
+# MODELO DE USUARIO
+# ============================================================
 class Usuario(UserMixin):
     def __init__(self, id, username, password_hash, role):
         self.id = id
@@ -41,52 +41,43 @@ class Usuario(UserMixin):
         self.password_hash = password_hash
         self.role = role
 
+    def check_password(self, password: str) -> bool:
+        return bcrypt.verify(password, self.password_hash)
 
 @login_manager.user_loader
 def load_user(user_id):
     with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
-        user = conn.execute(
-            "SELECT * FROM usuarios WHERE id = %s", (user_id,)
-        ).fetchone()
+        user = conn.execute("SELECT * FROM usuarios WHERE id = %s", (user_id,)).fetchone()
         if user:
             return Usuario(user["id"], user["username"], user["password_hash"], user["role"])
     return None
 
+# ============================================================
+# HELPER: TRUNCADO DE CONTRASEÑAS A 72 BYTES (bcrypt)
+# ============================================================
+def _trim_pw(pw: str) -> str:
+    """
+    Bcrypt solo procesa los primeros 72 bytes del password.
+    Esta función garantiza que nunca se exceda ese límite.
+    """
+    try:
+        b = pw.encode("utf-8")
+        if len(b) > 72:
+            b = b[:72]
+        return b.decode("utf-8", errors="ignore")
+    except Exception:
+        # Si algo raro pasa, regresamos el original
+        return pw
 
-# ----------------------------
-# Crear tablas si no existen
-# ----------------------------
-def crear_tablas():
-    with psycopg.connect(DB_URL) as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(50) UNIQUE NOT NULL,
-                password_hash VARCHAR(128) NOT NULL,
-                role VARCHAR(20) DEFAULT 'usuario'
-            );
-        """)
-        conn.commit()
-    print("✅ Tablas verificadas o creadas correctamente.")
-
-
-# ----------------------------
-# Rutas
-# ----------------------------
-@app.route("/")
-@login_required
-def index():
-    return render_template("form.html", usuario=current_user.username)
-
-
+# ============================================================
+# RUTAS DE AUTENTICACIÓN
+# ============================================================
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        username = request.form["username"].strip()
-        password = request.form["password"]
-
-        # 🔒 Truncar a 72 bytes para evitar error bcrypt
-        password = (password or "").encode("utf-8")[:72].decode("utf-8", "ignore")
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "").strip()
+        password = _trim_pw(password)  # <-- TRUNCADO ANTES DE VERIFICAR
 
         with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
             user = conn.execute(
@@ -104,53 +95,202 @@ def login():
 
     return render_template("login.html")
 
-
 @app.route("/logout")
 @login_required
 def logout():
     logout_user()
-    flash("Has cerrado sesión correctamente.", "info")
+    flash("Sesión cerrada.", "info")
     return redirect(url_for("login"))
 
-
-@app.route("/register", methods=["GET", "POST"])
-def register():
+# ============================================================
+# RUTA PRINCIPAL (FORMULARIO)
+# ============================================================
+@app.route("/", methods=["GET", "POST"])
+@login_required
+def index():
     if request.method == "POST":
-        username = request.form["username"].strip()
-        password = request.form["password"]
+        usuario = request.form["usuario"].strip()
+        fecha = request.form["fecha"]
+        producto = request.form["producto"].strip()
+        tipo = request.form["tipo"]
+        monto = float(request.form["monto"])
 
-        # 🔒 Truncar también al crear usuario
-        password = (password or "").encode("utf-8")[:72].decode("utf-8", "ignore")
-        hashed = bcrypt.hash(password)
+        with psycopg.connect(DB_URL) as conn:
+            with conn.cursor() as cur:
+                # Crear cliente si no existe
+                cur.execute("SELECT id FROM clientes WHERE nombre = %s", (usuario,))
+                user_exists = cur.fetchone()
+                if not user_exists:
+                    cur.execute("INSERT INTO clientes (nombre) VALUES (%s)", (usuario,))
 
-        try:
-            with psycopg.connect(DB_URL) as conn:
-                conn.execute(
-                    "INSERT INTO usuarios (username, password_hash) VALUES (%s, %s)",
-                    (username, hashed),
+                # Registrar movimiento
+                cur.execute(
+                    """
+                    INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (usuario, fecha, producto, tipo, monto),
                 )
                 conn.commit()
-            flash("Usuario registrado con éxito. Inicia sesión.", "success")
-            return redirect(url_for("login"))
-        except Exception as e:
-            flash(f"Error al registrar usuario: {e}", "error")
 
-    return render_template("register.html")
+        flash("Movimiento registrado correctamente.", "success")
+        return redirect(url_for("index"))
 
+    # Mostrar últimos movimientos
+    with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
+        ultimos = conn.execute(
+            """
+            SELECT usuario, fecha, producto, tipo, monto
+            FROM movimientos
+            ORDER BY id DESC
+            LIMIT 10
+            """
+        ).fetchall()
 
-# ----------------------------
-# Health check (para Render)
-# ----------------------------
-@app.route("/health")
-def health():
-    return "OK", 200
+    return render_template(
+        "form.html",
+        ultimos=ultimos,
+        now=datetime.today().strftime("%Y-%m-%d"),
+    )
 
+# ============================================================
+# DETALLE POR USUARIO
+# ============================================================
+@app.route("/usuario/<name>")
+@login_required
+def detalle_usuario(name):
+    with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
+        registros = conn.execute(
+            """
+            SELECT fecha, producto, tipo, monto
+            FROM movimientos
+            WHERE usuario = %s
+            ORDER BY fecha ASC
+            """,
+            (name,),
+        ).fetchall()
 
-# ----------------------------
-# Main
-# ----------------------------
+    saldo = 0
+    tabla = []
+    for r in registros:
+        if r["tipo"] == "Compra":
+            saldo += r["monto"]
+        else:
+            saldo -= r["monto"]
+        tabla.append((r["fecha"], r["producto"], r["tipo"], r["monto"], saldo))
+
+    return render_template("usuario.html", user=name, tabla=tabla, saldo=saldo)
+
+# ============================================================
+# GENERAR PDF DEL USUARIO
+# ============================================================
+@app.route("/usuario/<name>/pdf")
+@login_required
+def usuario_pdf(name):
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    c.setTitle(f"Estado de cuenta - {name}")
+
+    # Logo y encabezado
+    logo_path = os.path.join("static", "ibafuco_logo.jpg")
+    if os.path.exists(logo_path):
+        c.drawImage(logo_path, 50, 750, width=80, height=80)
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(150, 800, f"Estado de cuenta - {name}")
+    c.setFont("Helvetica", 12)
+    c.drawString(150, 785, "Cocina - Iglesia Bautista Fundamental de Costa Rica")
+
+    # Consultar datos
+    with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
+        movimientos = conn.execute(
+            """
+            SELECT fecha, producto, tipo, monto
+            FROM movimientos
+            WHERE usuario = %s
+            ORDER BY fecha ASC
+            """,
+            (name,),
+        ).fetchall()
+
+    # Imprimir tabla
+    y = 740
+    saldo = 0
+    c.setFont("Helvetica", 11)
+    for m in movimientos:
+        y -= 20
+        if y < 100:
+            c.showPage()
+            y = 800
+            c.setFont("Helvetica", 11)
+
+        if m["tipo"] == "Compra":
+            saldo += m["monto"]
+        else:
+            saldo -= m["monto"]
+
+        c.drawString(60, y, m["fecha"].strftime("%d/%m/%Y"))
+        c.drawString(150, y, m["producto"])
+        c.drawString(350, y, m["tipo"])
+        c.drawRightString(500, y, f"₡{m['monto']:.2f}")
+        c.drawRightString(560, y, f"₡{saldo:.2f}")
+
+    # Total
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(60, 80, f"Saldo final: ₡{saldo:.2f}")
+
+    c.save()
+    buffer.seek(0)
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name=f"{name}_estado_cuenta.pdf",
+        mimetype="application/pdf",
+    )
+
+# ============================================================
+# CREAR TABLAS SI NO EXISTEN
+# ============================================================
+def inicializar_bd():
+    with psycopg.connect(DB_URL) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT DEFAULT 'user'
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS clientes (
+                id SERIAL PRIMARY KEY,
+                nombre TEXT UNIQUE NOT NULL
+            );
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS movimientos (
+                id SERIAL PRIMARY KEY,
+                usuario TEXT NOT NULL,
+                fecha DATE NOT NULL,
+                producto TEXT,
+                tipo TEXT CHECK (tipo IN ('Compra', 'Abono')),
+                monto NUMERIC NOT NULL
+            );
+            """
+        )
+        conn.commit()
+        print("✅ Tablas verificadas o creadas correctamente.")
+
+# ============================================================
+# EJECUCIÓN LOCAL
+# ============================================================
 if __name__ == "__main__":
-    crear_tablas()
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    inicializar_bd()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
 
