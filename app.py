@@ -92,7 +92,6 @@ def index():
                 user_exists = cur.fetchone()
                 if not user_exists:
                     cur.execute("INSERT INTO clientes (nombre) VALUES (%s)", (usuario,))
-                
                 # Registrar movimiento
                 cur.execute("""
                     INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
@@ -215,12 +214,11 @@ def inicializar_bd():
         conn.commit()
         print("✅ Tablas verificadas o creadas correctamente.")
 
+# 🔸 ¡OJO!: Ejecutamos la inicialización SIEMPRE (también cuando arranca Gunicorn)
+inicializar_bd()
 
-# --- EJECUCIÓN LOCAL ---
+
+# --- EJECUCIÓN LOCAL (Gunicorn ignora esta sección) ---
 if __name__ == "__main__":
-    import os
-    inicializar_bd()
     port = int(os.environ.get("PORT", 5000))
-    from flask import Flask
     app.run(host="0.0.0.0", port=port)
-
