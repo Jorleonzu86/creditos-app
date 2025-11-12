@@ -1,4 +1,3 @@
-import os
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file
 from flask_login import LoginManager, login_user, logout_user, login_required, UserMixin
 from passlib.hash import bcrypt
@@ -8,6 +7,7 @@ from reportlab.pdfgen import canvas
 from datetime import datetime
 import psycopg
 from psycopg.rows import dict_row
+import os  # ✅ IMPORTANTE: necesario para variables de entorno
 
 # --- CONFIGURACIÓN PRINCIPAL ---
 app = Flask(__name__)
@@ -49,7 +49,13 @@ def load_user(user_id):
 def login():
     if request.method == "POST":
         username = request.form["username"].strip()
-        password = request.form["password"].strip()
+        password = request.form["password"]
+
+        # ✅ Evita error bcrypt: truncamos a 72 bytes máximo
+        try:
+            password = password.encode("utf-8")[:72].decode("utf-8", "ignore")
+        except Exception:
+            password = password[:72]
 
         with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
             user = conn.execute("SELECT * FROM usuarios WHERE username = %s", (username,)).fetchone()
@@ -92,6 +98,7 @@ def index():
                 user_exists = cur.fetchone()
                 if not user_exists:
                     cur.execute("INSERT INTO clientes (nombre) VALUES (%s)", (usuario,))
+                
                 # Registrar movimiento
                 cur.execute("""
                     INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
@@ -214,11 +221,16 @@ def inicializar_bd():
         conn.commit()
         print("✅ Tablas verificadas o creadas correctamente.")
 
-# 🔸 ¡OJO!: Ejecutamos la inicialización SIEMPRE (también cuando arranca Gunicorn)
-inicializar_bd()
+
+# --- RUTA DE PRUEBA ---
+@app.route("/health")
+def health():
+    return "ok", 200
 
 
-# --- EJECUCIÓN LOCAL (Gunicorn ignora esta sección) ---
+# --- EJECUCIÓN LOCAL ---
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    inicializar_bd()
+    from waitress import serve
+    serve(app, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+
