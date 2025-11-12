@@ -7,7 +7,7 @@ from reportlab.pdfgen import canvas
 from datetime import datetime
 import psycopg
 from psycopg.rows import dict_row
-import os  # ✅ IMPORTANTE: necesario para variables de entorno
+import os
 
 # --- CONFIGURACIÓN PRINCIPAL ---
 app = Flask(__name__)
@@ -32,6 +32,8 @@ class Usuario(UserMixin):
         self.role = role
 
     def check_password(self, password):
+        # 🔒 Aseguramos que la contraseña no exceda los 72 bytes
+        password = password.encode("utf-8")[:72].decode("utf-8", "ignore")
         return bcrypt.verify(password, self.password_hash)
 
 
@@ -51,22 +53,19 @@ def login():
         username = request.form["username"].strip()
         password = request.form["password"]
 
-        # ✅ Evita error bcrypt: truncamos a 72 bytes máximo
-        try:
-            password = password.encode("utf-8")[:72].decode("utf-8", "ignore")
-        except Exception:
-            password = password[:72]
-
         with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
             user = conn.execute("SELECT * FROM usuarios WHERE username = %s", (username,)).fetchone()
 
-        if user and bcrypt.verify(password, user["password_hash"]):
-            user_obj = Usuario(user["id"], user["username"], user["password_hash"], user["role"])
-            login_user(user_obj)
-            flash("Inicio de sesión exitoso.", "success")
-            return redirect(url_for("index"))
-        else:
-            flash("Usuario o contraseña incorrectos.", "error")
+        if user:
+            password = password.encode("utf-8")[:72].decode("utf-8", "ignore")  # ✅ Truncamos antes de verificar
+            if bcrypt.verify(password, user["password_hash"]):
+                user_obj = Usuario(user["id"], user["username"], user["password_hash"], user["role"])
+                login_user(user_obj)
+                flash("Inicio de sesión exitoso.", "success")
+                return redirect(url_for("index"))
+        
+        flash("Usuario o contraseña incorrectos.", "error")
+        return redirect(url_for("login"))
 
     return render_template("login.html")
 
@@ -93,13 +92,11 @@ def index():
 
         with psycopg.connect(DB_URL) as conn:
             with conn.cursor() as cur:
-                # Crear usuario si no existe
                 cur.execute("SELECT id FROM clientes WHERE nombre = %s", (usuario,))
                 user_exists = cur.fetchone()
                 if not user_exists:
                     cur.execute("INSERT INTO clientes (nombre) VALUES (%s)", (usuario,))
                 
-                # Registrar movimiento
                 cur.execute("""
                     INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
                     VALUES (%s, %s, %s, %s, %s)
@@ -109,7 +106,6 @@ def index():
         flash("Movimiento registrado correctamente.", "success")
         return redirect(url_for("index"))
 
-    # Mostrar los últimos movimientos
     with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
         ultimos = conn.execute("""
             SELECT usuario, fecha, producto, tipo, monto 
@@ -147,7 +143,6 @@ def usuario_pdf(name):
     c = canvas.Canvas(buffer, pagesize=A4)
     c.setTitle(f"Estado de cuenta - {name}")
 
-    # Logo y encabezado
     logo_path = os.path.join("static", "ibafuco_logo.jpg")
     if os.path.exists(logo_path):
         c.drawImage(logo_path, 50, 750, width=80, height=80)
@@ -156,14 +151,12 @@ def usuario_pdf(name):
     c.setFont("Helvetica", 12)
     c.drawString(150, 785, "Cocina - Iglesia Bautista Fundamental de Costa Rica")
 
-    # Consultar datos
     with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
         movimientos = conn.execute("""
             SELECT fecha, producto, tipo, monto
             FROM movimientos WHERE usuario = %s ORDER BY fecha ASC
         """, (name,)).fetchall()
 
-    # Imprimir tabla
     y = 740
     saldo = 0
     for m in movimientos:
@@ -181,7 +174,6 @@ def usuario_pdf(name):
         c.drawRightString(500, y, f"₡{m['monto']:.2f}")
         c.drawRightString(560, y, f"₡{saldo:.2f}")
 
-    # Total
     c.setFont("Helvetica-Bold", 14)
     c.drawString(60, 80, f"Saldo final: ₡{saldo:.2f}")
 
@@ -222,13 +214,11 @@ def inicializar_bd():
         print("✅ Tablas verificadas o creadas correctamente.")
 
 
-# --- RUTA DE PRUEBA ---
 @app.route("/health")
 def health():
     return "ok", 200
 
 
-# --- EJECUCIÓN LOCAL ---
 if __name__ == "__main__":
     inicializar_bd()
     from waitress import serve
