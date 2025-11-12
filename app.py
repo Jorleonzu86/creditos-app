@@ -1,29 +1,39 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, send_file
-from flask_login import LoginManager, login_user, logout_user, login_required, UserMixin
+import os
+from flask import Flask, render_template, request, redirect, url_for, flash
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 from passlib.hash import bcrypt
-from io import BytesIO
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from datetime import datetime
 import psycopg
 from psycopg.rows import dict_row
-import os
+from flask_talisman import Talisman
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_seasurf import SeaSurf
+from dotenv import load_dotenv
 
-# --- CONFIGURACIÓN PRINCIPAL ---
+# ----------------------------
+# Configuración inicial
+# ----------------------------
+load_dotenv()
+
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "clave-super-segura")
+app.secret_key = os.getenv("SECRET_KEY", "secret_key")
 
+# Seguridad y rate limiting
+Talisman(app, content_security_policy=None)
+csrf = SeaSurf(app)
+limiter = Limiter(get_remote_address, app=app)
+
+# Configuración de base de datos (Neon o local)
 DB_URL = os.getenv("DATABASE_URL")
-if not DB_URL:
-    raise RuntimeError("⚠️ No se encontró DATABASE_URL en las variables de entorno.")
 
-# --- LOGIN ---
+# ----------------------------
+# Flask-Login setup
+# ----------------------------
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
 
 
-# --- MODELO DE USUARIO ---
 class Usuario(UserMixin):
     def __init__(self, id, username, password_hash, role):
         self.id = id
@@ -31,201 +41,116 @@ class Usuario(UserMixin):
         self.password_hash = password_hash
         self.role = role
 
-    def check_password(self, password):
-        # ✅ Truncar contraseñas largas a 72 bytes (límite de bcrypt)
-        if isinstance(password, str):
-            password = password.encode("utf-8")
-        password = password[:72]
-        try:
-            return bcrypt.verify(password.decode("utf-8", "ignore"), self.password_hash)
-        except Exception:
-            return False
-
 
 @login_manager.user_loader
 def load_user(user_id):
     with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
-        user = conn.execute("SELECT * FROM usuarios WHERE id = %s", (user_id,)).fetchone()
+        user = conn.execute(
+            "SELECT * FROM usuarios WHERE id = %s", (user_id,)
+        ).fetchone()
         if user:
             return Usuario(user["id"], user["username"], user["password_hash"], user["role"])
     return None
 
 
-# --- RUTA: LOGIN ---
+# ----------------------------
+# Crear tablas si no existen
+# ----------------------------
+def crear_tablas():
+    with psycopg.connect(DB_URL) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                password_hash VARCHAR(128) NOT NULL,
+                role VARCHAR(20) DEFAULT 'usuario'
+            );
+        """)
+        conn.commit()
+    print("✅ Tablas verificadas o creadas correctamente.")
+
+
+# ----------------------------
+# Rutas
+# ----------------------------
+@app.route("/")
+@login_required
+def index():
+    return render_template("form.html", usuario=current_user.username)
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
         username = request.form["username"].strip()
-        password = request.form["password"].strip()
+        password = request.form["password"]
+
+        # 🔒 Truncar a 72 bytes para evitar error bcrypt
+        password = (password or "").encode("utf-8")[:72].decode("utf-8", "ignore")
 
         with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
-            user = conn.execute("SELECT * FROM usuarios WHERE username = %s", (username,)).fetchone()
+            user = conn.execute(
+                "SELECT * FROM usuarios WHERE username = %s",
+                (username,)
+            ).fetchone()
 
-        if user:
+        if user and bcrypt.verify(password, user["password_hash"]):
             user_obj = Usuario(user["id"], user["username"], user["password_hash"], user["role"])
-            if user_obj.check_password(password):
-                login_user(user_obj)
-                flash("Inicio de sesión exitoso.", "success")
-                return redirect(url_for("index"))
-
-        flash("Usuario o contraseña incorrectos.", "error")
-        return redirect(url_for("login"))
+            login_user(user_obj)
+            flash("Inicio de sesión exitoso.", "success")
+            return redirect(url_for("index"))
+        else:
+            flash("Usuario o contraseña incorrectos.", "error")
 
     return render_template("login.html")
 
 
-# --- RUTA: LOGOUT ---
 @app.route("/logout")
 @login_required
 def logout():
     logout_user()
-    flash("Sesión cerrada.", "info")
+    flash("Has cerrado sesión correctamente.", "info")
     return redirect(url_for("login"))
 
 
-# --- RUTA PRINCIPAL: FORMULARIO ---
-@app.route("/", methods=["GET", "POST"])
-@login_required
-def index():
+@app.route("/register", methods=["GET", "POST"])
+def register():
     if request.method == "POST":
-        usuario = request.form["usuario"].strip()
-        fecha = request.form["fecha"]
-        producto = request.form["producto"].strip()
-        tipo = request.form["tipo"]
-        monto = float(request.form["monto"])
+        username = request.form["username"].strip()
+        password = request.form["password"]
 
-        with psycopg.connect(DB_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT id FROM clientes WHERE nombre = %s", (usuario,))
-                user_exists = cur.fetchone()
-                if not user_exists:
-                    cur.execute("INSERT INTO clientes (nombre) VALUES (%s)", (usuario,))
-                
-                cur.execute("""
-                    INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (usuario, fecha, producto, tipo, monto))
+        # 🔒 Truncar también al crear usuario
+        password = (password or "").encode("utf-8")[:72].decode("utf-8", "ignore")
+        hashed = bcrypt.hash(password)
+
+        try:
+            with psycopg.connect(DB_URL) as conn:
+                conn.execute(
+                    "INSERT INTO usuarios (username, password_hash) VALUES (%s, %s)",
+                    (username, hashed),
+                )
                 conn.commit()
+            flash("Usuario registrado con éxito. Inicia sesión.", "success")
+            return redirect(url_for("login"))
+        except Exception as e:
+            flash(f"Error al registrar usuario: {e}", "error")
 
-        flash("Movimiento registrado correctamente.", "success")
-        return redirect(url_for("index"))
-
-    with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
-        ultimos = conn.execute("""
-            SELECT usuario, fecha, producto, tipo, monto 
-            FROM movimientos ORDER BY id DESC LIMIT 10
-        """).fetchall()
-
-    return render_template("form.html", ultimos=ultimos, now=datetime.today().strftime("%Y-%m-%d"))
+    return render_template("register.html")
 
 
-# --- RUTA: DETALLE POR USUARIO ---
-@app.route("/usuario/<name>")
-@login_required
-def detalle_usuario(name):
-    with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
-        registros = conn.execute("""
-            SELECT fecha, producto, tipo, monto
-            FROM movimientos WHERE usuario = %s ORDER BY fecha ASC
-        """, (name,)).fetchall()
-
-        saldo = sum(r["monto"] if r["tipo"] == "Compra" else -r["monto"] for r in registros)
-        tabla = []
-        acumulado = 0
-        for r in registros:
-            acumulado += r["monto"] if r["tipo"] == "Compra" else -r["monto"]
-            tabla.append((r["fecha"], r["producto"], r["tipo"], r["monto"], acumulado))
-
-    return render_template("usuario.html", user=name, tabla=tabla, saldo=saldo)
-
-
-# --- RUTA: GENERAR PDF ---
-@app.route("/usuario/<name>/pdf")
-@login_required
-def usuario_pdf(name):
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    c.setTitle(f"Estado de cuenta - {name}")
-
-    logo_path = os.path.join("static", "ibafuco_logo.jpg")
-    if os.path.exists(logo_path):
-        c.drawImage(logo_path, 50, 750, width=80, height=80)
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(150, 800, f"Estado de cuenta - {name}")
-    c.setFont("Helvetica", 12)
-    c.drawString(150, 785, "Cocina - Iglesia Bautista Fundamental de Costa Rica")
-
-    with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
-        movimientos = conn.execute("""
-            SELECT fecha, producto, tipo, monto
-            FROM movimientos WHERE usuario = %s ORDER BY fecha ASC
-        """, (name,)).fetchall()
-
-    y = 740
-    saldo = 0
-    for m in movimientos:
-        y -= 20
-        if y < 100:
-            c.showPage()
-            y = 800
-        if m["tipo"] == "Compra":
-            saldo += m["monto"]
-        else:
-            saldo -= m["monto"]
-        c.drawString(60, y, m["fecha"].strftime("%d/%m/%Y"))
-        c.drawString(150, y, m["producto"])
-        c.drawString(350, y, m["tipo"])
-        c.drawRightString(500, y, f"₡{m['monto']:.2f}")
-        c.drawRightString(560, y, f"₡{saldo:.2f}")
-
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(60, 80, f"Saldo final: ₡{saldo:.2f}")
-
-    c.save()
-    buffer.seek(0)
-    return send_file(buffer, as_attachment=True, download_name=f"{name}_estado_cuenta.pdf", mimetype="application/pdf")
-
-
-# --- CREAR TABLAS SI NO EXISTEN ---
-def inicializar_bd():
-    with psycopg.connect(DB_URL) as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id SERIAL PRIMARY KEY,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                role TEXT DEFAULT 'user'
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS clientes (
-                id SERIAL PRIMARY KEY,
-                nombre TEXT UNIQUE NOT NULL
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS movimientos (
-                id SERIAL PRIMARY KEY,
-                usuario TEXT NOT NULL,
-                fecha DATE NOT NULL,
-                producto TEXT,
-                tipo TEXT CHECK (tipo IN ('Compra', 'Abono')),
-                monto NUMERIC NOT NULL
-            );
-        """)
-        conn.commit()
-        print("✅ Tablas verificadas o creadas correctamente.")
-
-
+# ----------------------------
+# Health check (para Render)
+# ----------------------------
 @app.route("/health")
 def health():
-    return "ok", 200
+    return "OK", 200
 
 
+# ----------------------------
+# Main
+# ----------------------------
 if __name__ == "__main__":
-    inicializar_bd()
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
-
+    crear_tablas()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
 
