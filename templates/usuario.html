@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Detalle de {{user}}</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 40px;
+      background-color: #f5f5f5;
+    }
+    h2 {
+      color: #0078d7;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background-color: white;
+      box-shadow: 0 0 8px rgba(0,0,0,0.1);
+    }
+    th {
+      background-color: #0078d7;
+      color: white;
+      padding: 8px;
+    }
+    td {
+      border-bottom: 1px solid #ddd;
+      padding: 6px;
+      text-align: center;
+    }
+    a {
+      color: #0078d7;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <h2>Historial de {{user}}</h2>
+
+  <table>
+    <tr>
+      <th>Fecha</th>
+      <th>Producto</th>
+      <th>Tipo</th>
+      <th>Monto</th>
+      <th>Saldo acumulado</th>
+    </tr>
+    {% for fila in tabla %}
+    <tr>
+      <td>{{fila[0]}}</td>
+      <td>{{fila[1]}}</td>
+      <td>{{fila[2]}}</td>
+      <td>₡{{fila[3]}}</td>
+      <td>₡{{fila[4]}}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <p><strong>Saldo actual: ₡{{saldo}}</strong></p>
+
+  <a href="{{ url_for('usuario_pdf', name=user) }}">📄 Generar PDF</a> |
+  <a href="{{ url_for('index') }}">⬅️ Volver</a>
+</body>
+</html>
