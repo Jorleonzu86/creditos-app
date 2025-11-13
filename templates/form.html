@@ -1,113 +1,173 @@
-<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <title>Registro de Compras y Abonos</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 40px;
-      background-color: #f9f9f9;
-    }
-    h2 {
-      color: #0078d7;
-    }
-    form {
-      background-color: white;
-      padding: 20px;
-      border-radius: 10px;
-      box-shadow: 0 0 10px rgba(0,0,0,0.1);
-      width: 350px;
-      margin-bottom: 30px;
-    }
-    input, select, button {
-      margin-top: 10px;
-      width: 100%;
-      padding: 8px;
-      border: 1px solid #ccc;
-      border-radius: 5px;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background-color: white;
-      box-shadow: 0 0 8px rgba(0,0,0,0.1);
-    }
-    th {
-      background-color: #0078d7;
-      color: white;
-      padding: 8px;
-    }
-    td {
-      border-bottom: 1px solid #ddd;
-      padding: 6px;
-      text-align: center;
-    }
-    a {
-      color: #0078d7;
-      text-decoration: none;
-    }
-    a:hover {
-      text-decoration: underline;
-    }
-    .logout {
-      margin-top: 15px;
-      display: inline-block;
-      background-color: #d9534f;
-      color: white;
-      padding: 8px 12px;
-      border-radius: 5px;
-      text-decoration: none;
-    }
-    .logout:hover {
-      background-color: #c9302c;
-    }
-  </style>
-</head>
-<body>
-  <h2>Registrar Compra o Abono</h2>
-  <form method="post">
-    <label>Usuario:</label>
-    <input name="usuario" required>
+{% extends "base.html" %}
 
-    <label>Fecha:</label>
-    <input type="date" name="fecha" value="{{now}}" required>
+{% block title %}Movimientos - Crédito-App{% endblock %}
 
-    <label>Producto:</label>
-    <input name="producto">
+{% block content %}
+<div class="row">
+    <!-- Formulario -->
+    <div class="col-lg-4 mb-4">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title mb-3">Registrar Compra o Abono</h5>
 
-    <label>Tipo:</label>
-    <select name="tipo" required>
-      <option>Compra</option>
-      <option>Abono</option>
-    </select>
+                <p class="mb-3">
+                    Saldo actual:
+                    {% if saldo_actual >= 0 %}
+                        <span class="badge bg-success saldo-badge">
+                            ₡ {{ "%.2f"|format(saldo_actual) }}
+                        </span>
+                    {% else %}
+                        <span class="badge bg-danger saldo-badge">
+                            ₡ {{ "%.2f"|format(saldo_actual) }}
+                        </span>
+                    {% endif %}
+                </p>
 
-    <label>Monto:</label>
-    <input name="monto" required type="number" step="0.01">
+                <form method="post" action="{{ url_for('registro_movimientos') }}">
+                    <div class="mb-3">
+                        <label class="form-label">Usuario</label>
+                        <input type="text" class="form-control"
+                               value="{{ current_user.username }}" disabled>
+                    </div>
 
-    <button type="submit">Guardar Movimiento</button>
-  </form>
+                    <div class="mb-3">
+                        <label for="fecha" class="form-label">Fecha</label>
+                        <input type="date" class="form-control" id="fecha" name="fecha"
+                               value="{{ request.form.fecha or datetime.utcnow().strftime('%Y-%m-%d') }}"
+                               required>
+                    </div>
 
-  <h3>Últimos movimientos registrados</h3>
-  <table>
-    <tr>
-      <th>Usuario</th>
-      <th>Fecha</th>
-      <th>Producto</th>
-      <th>Tipo</th>
-      <th>Monto</th>
-    </tr>
-    {% for m in ultimos %}
-    <tr>
-      <td><a href="{{ url_for('detalle_usuario', name=m['usuario']) }}">{{m['usuario']}}</a></td>
-      <td>{{m['fecha']}}</td>
-      <td>{{m['producto']}}</td>
-      <td>{{m['tipo']}}</td>
-      <td>₡{{m['monto']}}</td>
-    </tr>
-    {% endfor %}
-  </table>
+                    <div class="mb-3">
+                        <label for="producto" class="form-label">Producto</label>
+                        <input type="text" class="form-control" id="producto"
+                               name="producto" required>
+                    </div>
 
-  <a class="logout" href="{{ url_for('logout') }}">Cerrar sesión</a>
-</body>
-</html>
+                    <div class="mb-3">
+                        <label for="tipo" class="form-label">Tipo</label>
+                        <select class="form-select" id="tipo" name="tipo" required>
+                            <option value="Compra">Compra</option>
+                            <option value="Abono">Abono</option>
+                        </select>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="monto" class="form-label">Monto</label>
+                        <input type="number" class="form-control" id="monto"
+                               name="monto" min="0.01" step="0.01" required>
+                    </div>
+
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-success">
+                            Guardar Movimiento
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tabla -->
+    <div class="col-lg-8 mb-4">
+        <div class="card mb-3">
+            <div class="card-body">
+                <div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
+                    <h5 class="card-title mb-0">Últimos movimientos</h5>
+
+                    <form class="d-flex mt-2 mt-md-0"
+                          method="get"
+                          action="{{ url_for('registro_movimientos') }}">
+                        <input type="text" class="form-control form-control-sm me-2"
+                               name="search" placeholder="Buscar producto o tipo"
+                               value="{{ search }}">
+                        <button class="btn btn-outline-primary btn-sm" type="submit">
+                            Buscar
+                        </button>
+                    </form>
+                </div>
+
+                <div class="mb-2">
+                    <a href="{{ url_for('reporte_pdf') }}" class="btn btn-sm btn-outline-danger me-2">
+                        Descargar PDF
+                    </a>
+                    <a href="{{ url_for('reporte_excel') }}" class="btn btn-sm btn-outline-success">
+                        Exportar a Excel
+                    </a>
+                </div>
+
+                <div class="table-responsive mt-3">
+                    <table class="table table-sm table-striped align-middle">
+                        <thead class="table-primary">
+                            <tr>
+                                <th>Fecha</th>
+                                <th>Producto</th>
+                                <th>Tipo</th>
+                                <th class="text-end">Monto</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% if movimientos %}
+                            {% for m in movimientos %}
+                                <tr>
+                                    <td>{{ m.fecha.strftime('%d/%m/%Y') }}</td>
+                                    <td>{{ m.producto }}</td>
+                                    <td>
+                                        {% if m.tipo == 'Abono' %}
+                                            <span class="badge bg-success">{{ m.tipo }}</span>
+                                        {% else %}
+                                            <span class="badge bg-danger">{{ m.tipo }}</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="text-end">
+                                        {% if m.tipo == 'Abono' %}
+                                            + {{ "%.2f"|format(m.monto) }}
+                                        {% else %}
+                                            - {{ "%.2f"|format(m.monto) }}
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        {% else %}
+                            <tr>
+                                <td colspan="4" class="text-center text-muted">
+                                    No hay movimientos registrados.
+                                </td>
+                            </tr>
+                        {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Paginación -->
+                <nav aria-label="Paginación">
+                    <ul class="pagination pagination-sm justify-content-end">
+                        <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+                            <a class="page-link"
+                               href="{{ url_for('registro_movimientos', page=page-1, search=search) }}"
+                               tabindex="-1">Anterior</a>
+                        </li>
+
+                        {% for p in range(1, total_pages + 1) %}
+                            <li class="page-item {% if p == page %}active{% endif %}">
+                                <a class="page-link"
+                                   href="{{ url_for('registro_movimientos', page=p, search=search) }}">
+                                    {{ p }}
+                                </a>
+                            </li>
+                        {% endfor %}
+
+                        <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+                            <a class="page-link"
+                               href="{{ url_for('registro_movimientos', page=page+1, search=search) }}">
+                                Siguiente
+                            </a>
+                        </li>
+                    </ul>
+                </nav>
+
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
