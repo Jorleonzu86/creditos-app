@@ -30,11 +30,9 @@ app = Flask(__name__)
 # Clave secreta (puedes usar la de tu variable de entorno en Render)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-key")
 
-# URL de la base de datos: usa DATABASE_URL si existe (Render/Neon),
-# si no, usa un SQLite local.
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
-    "DATABASE_URL", "sqlite:///creditos.db"
-)
+# FORZAMOS SIEMPRE SQLITE PARA EVITAR psycopg2 / POSTGRES
+# Se creará un archivo creditos.db en el contenedor.
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///creditos.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
@@ -196,7 +194,7 @@ def logout():
 
 
 # -------------------------------------------------
-# Rutas para clientes (compradores)
+# Helpers de permisos
 # -------------------------------------------------
 def requiere_admin_o_cobrador():
     """Devuelve True si el usuario es admin o cobrador."""
@@ -205,6 +203,9 @@ def requiere_admin_o_cobrador():
     )
 
 
+# -------------------------------------------------
+# Rutas para clientes (compradores)
+# -------------------------------------------------
 @app.route("/clientes")
 @login_required
 def clientes_list():
