@@ -5,3 +5,4 @@ Flask-Migrate==4.0.5
 python-dotenv==1.0.1
 gunicorn==21.2.0
 reportlab==4.0.7
+fpdf2==2.7.9
