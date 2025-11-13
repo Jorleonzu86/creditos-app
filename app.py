@@ -1,432 +1,356 @@
 import os
-from flask import Flask, render_template, request, redirect, url_for, flash, send_file
-from flask_login import LoginManager, login_user, logout_user, login_required, UserMixin, current_user
-from passlib.hash import bcrypt
-from io import BytesIO
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
 from datetime import datetime
-import psycopg
-from psycopg.rows import dict_row
+from io import BytesIO
 
-# -------------------------------------------------
-# CONFIGURACIÓN BÁSICA
-# -------------------------------------------------
+from flask import (
+    Flask, render_template, redirect, url_for,
+    request, flash, send_file
+)
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from flask_login import (
+    LoginManager, UserMixin, login_user,
+    login_required, logout_user, current_user
+)
+from werkzeug.security import generate_password_hash, check_password_hash
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from dotenv import load_dotenv
+
+# =========================
+# Configuración básica
+# =========================
+
+load_dotenv()
+
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "clave-super-segura")
 
-DB_URL = os.getenv("DATABASE_URL")
-if not DB_URL:
-    raise RuntimeError("No se encontró DATABASE_URL en las variables de entorno.")
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-key")
 
-login_manager = LoginManager()
-login_manager.init_app(app)
+database_url = os.environ.get("DATABASE_URL")
+if database_url:
+    # Arreglo para URLs postgres antiguas
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace("postgres://", "postgresql://", 1)
+    app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+else:
+    # Fallback local
+    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///creditos.db"
+
+app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+
+login_manager = LoginManager(app)
 login_manager.login_view = "login"
 
+# =========================
+# Modelos
+# =========================
 
-def get_conn(dict_rows: bool = False):
-    """Devuelve una conexión a Postgres."""
-    if dict_rows:
-        return psycopg.connect(DB_URL, row_factory=dict_row)
-    return psycopg.connect(DB_URL)
+class Usuario(db.Model, UserMixin):
+    __tablename__ = "usuarios"
 
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(64), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False)
+    es_admin = db.Column(db.Boolean, default=False)
 
-# -------------------------------------------------
-# MODELO DE USUARIO PARA FLASK-LOGIN
-# -------------------------------------------------
-class Usuario(UserMixin):
-    def __init__(self, id, username, password_hash, role):
-        self.id = id
-        self.username = username
-        self.password_hash = password_hash or ""
-        self.role = role or "user"
+    def set_password(self, password: str) -> None:
+        """Genera el hash de la contraseña con Werkzeug."""
+        self.password_hash = generate_password_hash(password)
 
     def check_password(self, password: str) -> bool:
-        """Verifica el password usando bcrypt (truncando a 72 caracteres)."""
+        """Verifica contraseña con Werkzeug."""
         try:
             if not self.password_hash:
-                app.logger.warning(
-                    "[Usuario.check_password] password_hash vacío para user=%s",
-                    self.username,
-                )
+                print(f"[Usuario.check_password] password_hash vacío para user={self.username}")
                 return False
-            password = (password or "")[:72]
-            return bcrypt.verify(password, self.password_hash)
+            valido = check_password_hash(self.password_hash, password)
+            print(f"[Usuario.check_password] user={self.username} valido={valido}")
+            return valido
         except Exception as e:
-            app.logger.error(
-                "[Usuario.check_password] Error verificando hash para user=%s: %s",
-                self.username,
-                e,
-            )
+            print(f"[Usuario.check_password] Error al verificar contraseña para user={self.username}: {e}")
             return False
+
+
+class Movimiento(db.Model):
+    __tablename__ = "movimientos"
+
+    id = db.Column(db.Integer, primary_key=True)
+    usuario_id = db.Column(db.Integer, db.ForeignKey("usuarios.id"), nullable=False)
+    fecha = db.Column(db.Date, nullable=False, default=datetime.utcnow)
+    descripcion = db.Column(db.String(255), nullable=False)
+    tipo = db.Column(db.String(20), nullable=False)  # "Compra" o "Pago"
+    monto = db.Column(db.Numeric(10, 2), nullable=False)
+
+    usuario = db.relationship("Usuario", backref=db.backref("movimientos", lazy=True))
 
 
 @login_manager.user_loader
 def load_user(user_id):
-    """Carga un usuario por id desde la base de datos."""
-    try:
-        with get_conn(dict_rows=True) as conn:
-            user = conn.execute(
-                "SELECT * FROM usuarios WHERE id = %s",
-                (user_id,),
-            ).fetchone()
-        if user:
-            return Usuario(
-                user["id"],
-                user["username"],
-                user["password_hash"],
-                user["role"],
-            )
-    except Exception as e:
-        app.logger.error("[load_user] Error cargando usuario id=%s: %s", user_id, e)
-    return None
+    return Usuario.query.get(int(user_id))
 
 
-# -------------------------------------------------
-# INICIALIZACIÓN DE BASE DE DATOS
-# -------------------------------------------------
-def inicializar_bd():
-    """Crea tablas si no existen y garantiza un usuario admin: admin / admin123."""
-    # Crear tablas
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS usuarios (
-                    id SERIAL PRIMARY KEY,
-                    username TEXT UNIQUE NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    role TEXT DEFAULT 'user'
-                );
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS clientes (
-                    id SERIAL PRIMARY KEY,
-                    nombre TEXT UNIQUE NOT NULL
-                );
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS movimientos (
-                    id SERIAL PRIMARY KEY,
-                    usuario TEXT NOT NULL,
-                    fecha DATE NOT NULL,
-                    producto TEXT,
-                    tipo TEXT CHECK (tipo IN ('Compra', 'Abono')),
-                    monto NUMERIC NOT NULL
-                );
-                """
-            )
-            conn.commit()
+# =========================
+# Funciones de ayuda
+# =========================
 
-    # Crear o reparar usuario admin
-    with get_conn(dict_rows=True) as conn2:
-        admin = conn2.execute(
-            "SELECT id, password_hash FROM usuarios WHERE username = %s",
-            ("admin",),
-        ).fetchone()
-
-        if not admin:
-            # Crear admin con contraseña admin123
-            pwd = bcrypt.hash("admin123"[:72])
-            conn2.execute(
-                "INSERT INTO usuarios (username, password_hash, role) VALUES (%s, %s, %s)",
-                ("admin", pwd, "admin"),
-            )
-            conn2.commit()
-            app.logger.info("[inicializar_bd] Usuario admin creado con password admin123")
-        elif not admin["password_hash"]:
-            # Reparar admin sin hash
-            pwd = bcrypt.hash("admin123"[:72])
-            conn2.execute(
-                "UPDATE usuarios SET password_hash = %s WHERE id = %s",
-                (pwd, admin["id"]),
-            )
-            conn2.commit()
-            app.logger.info(
-                "[inicializar_bd] Hash de usuario admin reparado con password admin123"
-            )
+def calcular_saldo(usuario: Usuario) -> float:
+    saldo = 0.0
+    for mov in usuario.movimientos:
+        if mov.tipo == "Compra":
+            saldo += float(mov.monto)
+        else:  # Pago u otro
+            saldo -= float(mov.monto)
+    return saldo
 
 
-# -------------------------------------------------
-# RUTAS DE AUTENTICACIÓN
-# -------------------------------------------------
+def generar_pdf_usuario(usuario: Usuario):
+    buffer = BytesIO()
+    p = canvas.Canvas(buffer, pagesize=letter)
+    width, height = letter
+
+    y = height - 50
+    p.setFont("Helvetica-Bold", 14)
+    p.drawString(50, y, f"Reporte de movimientos - Usuario: {usuario.username}")
+    y -= 30
+
+    p.setFont("Helvetica", 10)
+    for mov in usuario.movimientos:
+        linea = f"{mov.fecha} - {mov.descripcion} - {mov.tipo} - {mov.monto}"
+        p.drawString(50, y, linea)
+        y -= 15
+        if y < 50:
+            p.showPage()
+            y = height - 50
+            p.setFont("Helvetica", 10)
+
+    y -= 20
+    saldo = calcular_saldo(usuario)
+    p.setFont("Helvetica-Bold", 12)
+    p.drawString(50, y, f"Saldo actual: {saldo:.2f}")
+
+    p.showPage()
+    p.save()
+    buffer.seek(0)
+    return buffer
+
+
+# =========================
+# Rutas
+# =========================
+
+@app.route("/")
+@login_required
+def index():
+    # Redirige a la pantalla principal de movimientos
+    return redirect(url_for("registro_movimientos"))
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+
+    error = None
+
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
 
-        if not username or not password:
-            flash("Debe ingresar usuario y contraseña.", "error")
-            return render_template("login.html")
+        user = Usuario.query.filter_by(username=username).first()
 
-        try:
-            with get_conn(dict_rows=True) as conn:
-                user = conn.execute(
-                    "SELECT * FROM usuarios WHERE username = %s",
-                    (username,),
-                ).fetchone()
-        except Exception as e:
-            app.logger.error("[LOGIN] Error buscando usuario '%s': %s", username, e)
-            flash("Error interno al buscar usuario.", "error")
-            return render_template("login.html")
-
-        if not user:
-            flash("Usuario o contraseña incorrectos.", "error")
-            return render_template("login.html")
-
-        user_obj = Usuario(
-            user["id"],
-            user["username"],
-            user["password_hash"],
-            user["role"],
-        )
-
-        if user_obj.check_password(password):
-            login_user(user_obj)
-            flash("Inicio de sesión exitoso.", "success")
-            return redirect(url_for("index"))
+        if user and user.check_password(password):
+            login_user(user)
+            flash("Sesión iniciada correctamente.", "success")
+            next_page = request.args.get("next")
+            return redirect(next_page or url_for("index"))
         else:
-            flash("Usuario o contraseña incorrectos.", "error")
-            return render_template("login.html")
+            error = "Usuario o contraseña incorrectos."
 
-    return render_template("login.html")
+    return render_template("login.html", error=error)
 
 
 @app.route("/logout")
 @login_required
 def logout():
     logout_user()
-    flash("Sesión cerrada.", "info")
+    flash("Sesión finalizada.", "info")
     return redirect(url_for("login"))
 
 
-# -------------------------------------------------
-# RUTA PRINCIPAL: FORMULARIO Y ÚLTIMOS MOVIMIENTOS
-# -------------------------------------------------
-@app.route("/", methods=["GET", "POST"])
+@app.route("/movimientos", methods=["GET", "POST"])
 @login_required
-def index():
+def registro_movimientos():
+    # POST: registrar movimiento
     if request.method == "POST":
-        usuario = request.form.get("usuario", "").strip()
-        fecha = request.form.get("fecha")
-        producto = request.form.get("producto", "").strip()
-        tipo = request.form.get("tipo")
-        monto_str = request.form.get("monto", "").strip()
+        if current_user.es_admin:
+            usuario_id = request.form.get("usuario_id")
+        else:
+            usuario_id = current_user.id
 
-        if not usuario or not fecha or not tipo or not monto_str:
-            flash("Todos los campos son obligatorios.", "error")
-            return redirect(url_for("index"))
+        descripcion = request.form.get("descripcion", "").strip()
+        tipo = request.form.get("tipo", "Compra")
+        monto_str = request.form.get("monto", "0").replace(",", ".")
+        fecha_str = request.form.get("fecha")
 
         try:
             monto = float(monto_str)
         except ValueError:
-            flash("El monto debe ser un número válido.", "error")
-            return redirect(url_for("index"))
+            flash("Monto inválido.", "danger")
+            return redirect(url_for("registro_movimientos"))
 
-        try:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    # Asegurar que el cliente exista
-                    cur.execute(
-                        """
-                        INSERT INTO clientes (nombre)
-                        VALUES (%s)
-                        ON CONFLICT (nombre) DO NOTHING;
-                        """,
-                        (usuario,),
-                    )
-                    # Insertar movimiento
-                    cur.execute(
-                        """
-                        INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
-                        VALUES (%s, %s, %s, %s, %s)
-                        """,
-                        (usuario, fecha, producto, tipo, monto),
-                    )
-                    conn.commit()
-            flash("Movimiento registrado correctamente.", "success")
-        except Exception as e:
-            app.logger.error("[INDEX POST] Error insertando movimiento: %s", e)
-            flash("Error al registrar el movimiento.", "error")
+        if fecha_str:
+            try:
+                fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
+            except ValueError:
+                fecha = datetime.utcnow().date()
+        else:
+            fecha = datetime.utcnow().date()
 
+        if not descripcion:
+            flash("La descripción es obligatoria.", "danger")
+            return redirect(url_for("registro_movimientos"))
+
+        mov = Movimiento(
+            usuario_id=int(usuario_id),
+            descripcion=descripcion,
+            tipo=tipo,
+            monto=monto,
+            fecha=fecha,
+        )
+        db.session.add(mov)
+        db.session.commit()
+        flash("Movimiento registrado correctamente.", "success")
+        return redirect(url_for("registro_movimientos"))
+
+    # GET: mostrar movimientos
+    if current_user.es_admin:
+        usuario_id = request.args.get("usuario_id", type=int)
+        if usuario_id:
+            movimientos = (
+                Movimiento.query.filter_by(usuario_id=usuario_id)
+                .order_by(Movimiento.fecha.desc())
+                .all()
+            )
+            usuario_actual = Usuario.query.get(usuario_id)
+        else:
+            movimientos = Movimiento.query.order_by(Movimiento.fecha.desc()).all()
+            usuario_actual = None
+        usuarios = Usuario.query.order_by(Usuario.username).all()
+    else:
+        movimientos = (
+            Movimiento.query.filter_by(usuario_id=current_user.id)
+            .order_by(Movimiento.fecha.desc())
+            .all()
+        )
+        usuario_actual = current_user
+        usuarios = None
+
+    if current_user.es_admin and not usuario_actual:
+        saldo = None
+    else:
+        saldo = calcular_saldo(usuario_actual)
+
+    return render_template(
+        "movimientos.html",
+        movimientos=movimientos,
+        usuarios=usuarios,
+        usuario_actual=usuario_actual,
+        saldo=saldo,
+    )
+
+
+@app.route("/usuarios")
+@login_required
+def usuarios_list():
+    if not current_user.es_admin:
+        flash("Solo el administrador puede ver la lista de usuarios.", "danger")
         return redirect(url_for("index"))
 
-    # GET: mostrar últimos movimientos
-    try:
-        with get_conn(dict_rows=True) as conn:
-            ultimos = conn.execute(
-                """
-                SELECT usuario, fecha, producto, tipo, monto
-                FROM movimientos
-                ORDER BY id DESC
-                LIMIT 10
-                """
-            ).fetchall()
-    except Exception as e:
-        app.logger.error("[INDEX GET] Error consultando últimos movimientos: %s", e)
-        ultimos = []
+    usuarios = Usuario.query.order_by(Usuario.username).all()
+    data = [
+        {
+            "id": u.id,
+            "username": u.username,
+            "saldo": calcular_saldo(u),
+        }
+        for u in usuarios
+    ]
 
-    hoy = datetime.today().strftime("%Y-%m-%d")
-    return render_template("form.html", ultimos=ultimos, now=hoy)
+    return render_template("usuarios_list.html", usuarios=data)
 
 
-# -------------------------------------------------
-# DETALLE POR USUARIO
-# -------------------------------------------------
-@app.route("/usuario/<name>")
+@app.route("/usuarios/<int:usuario_id>")
 @login_required
-def detalle_usuario(name):
-    try:
-        with get_conn(dict_rows=True) as conn:
-            registros = conn.execute(
-                """
-                SELECT fecha, producto, tipo, monto
-                FROM movimientos
-                WHERE usuario = %s
-                ORDER BY fecha ASC, id ASC
-                """,
-                (name,),
-            ).fetchall()
-    except Exception as e:
-        app.logger.error("[detalle_usuario] Error consultando usuario '%s': %s", name, e)
-        registros = []
+def usuario_detalle(usuario_id):
+    if not current_user.es_admin and current_user.id != usuario_id:
+        flash("No tienes permiso para ver este usuario.", "danger")
+        return redirect(url_for("index"))
 
-    saldo = 0.0
-    tabla = []
+    usuario = Usuario.query.get_or_404(usuario_id)
+    movimientos = (
+        Movimiento.query.filter_by(usuario_id=usuario.id)
+        .order_by(Movimiento.fecha.desc())
+        .all()
+    )
+    saldo = calcular_saldo(usuario)
 
-    for r in registros:
-        monto = float(r["monto"])
-        if r["tipo"] == "Compra":
-            saldo += monto
-        else:
-            saldo -= monto
-
-        fecha_val = r["fecha"]
-        if hasattr(fecha_val, "strftime"):
-            fecha_str = fecha_val.strftime("%d/%m/%Y")
-        else:
-            fecha_str = str(fecha_val)
-
-        tabla.append(
-            {
-                "fecha": fecha_str,
-                "producto": r.get("producto", ""),
-                "tipo": r.get("tipo", ""),
-                "monto": monto,
-                "saldo": saldo,
-            }
-        )
-
-    return render_template("usuario.html", user=name, tabla=tabla, saldo=saldo)
+    return render_template(
+        "usuario.html",
+        usuario=usuario,
+        movimientos=movimientos,
+        saldo=saldo,
+    )
 
 
-# -------------------------------------------------
-# PDF POR USUARIO
-# -------------------------------------------------
-@app.route("/usuario/<name>/pdf")
+@app.route("/usuarios/<int:usuario_id>/pdf")
 @login_required
-def usuario_pdf(name):
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    c.setTitle(f"Estado de cuenta - {name}")
+def usuario_pdf(usuario_id):
+    if not current_user.es_admin and current_user.id != usuario_id:
+        flash("No tienes permiso para descargar este PDF.", "danger")
+        return redirect(url_for("index"))
 
-    # Logo
-    logo_path = os.path.join(app.root_path, "static", "ibafuco_logo.jpg")
-    if os.path.exists(logo_path):
-        c.drawImage(logo_path, 50, 750, width=80, height=80)
+    usuario = Usuario.query.get_or_404(usuario_id)
+    buffer = generar_pdf_usuario(usuario)
 
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(150, 800, f"Estado de cuenta - {name}")
-    c.setFont("Helvetica", 12)
-    c.drawString(150, 785, "Cocina - Iglesia Bautista Fundamental de Costa Rica")
-
-    # Datos
-    try:
-        with get_conn(dict_rows=True) as conn:
-            movimientos = conn.execute(
-                """
-                SELECT fecha, producto, tipo, monto
-                FROM movimientos
-                WHERE usuario = %s
-                ORDER BY fecha ASC, id ASC
-                """,
-                (name,),
-            ).fetchall()
-    except Exception as e:
-        app.logger.error("[usuario_pdf] Error consultando usuario '%s': %s", name, e)
-        movimientos = []
-
-    y = 740
-    saldo = 0.0
-
-    # Encabezados
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(60, y, "Fecha")
-    c.drawString(130, y, "Producto")
-    c.drawString(320, y, "Tipo")
-    c.drawRightString(430, y, "Monto")
-    c.drawRightString(520, y, "Saldo")
-    c.setFont("Helvetica", 10)
-    y -= 20
-
-    for m in movimientos:
-        if y < 80:
-            c.showPage()
-            y = 800
-            c.setFont("Helvetica-Bold", 11)
-            c.drawString(60, y, "Fecha")
-            c.drawString(130, y, "Producto")
-            c.drawString(320, y, "Tipo")
-            c.drawRightString(430, y, "Monto")
-            c.drawRightString(520, y, "Saldo")
-            c.setFont("Helvetica", 10)
-            y -= 20
-
-        monto = float(m["monto"])
-        if m["tipo"] == "Compra":
-            saldo += monto
-        else:
-            saldo -= monto
-
-        fecha_val = m["fecha"]
-        if hasattr(fecha_val, "strftime"):
-            fecha_str = fecha_val.strftime("%d/%m/%Y")
-        else:
-            fecha_str = str(fecha_val)
-
-        c.drawString(60, y, fecha_str)
-        c.drawString(130, y, m.get("producto", ""))
-        c.drawString(320, y, m.get("tipo", ""))
-        c.drawRightString(430, y, f"₡{monto:,.2f}")
-        c.drawRightString(520, y, f"₡{saldo:,.2f}")
-        y -= 18
-
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(60, 60, f"Saldo final: ₡{saldo:,.2f}")
-
-    c.save()
-    buffer.seek(0)
-    filename = f"{name}_estado_cuenta.pdf"
-    return send_file(buffer, as_attachment=True, download_name=filename, mimetype="application/pdf")
+    filename = f"reporte_{usuario.username}.pdf"
+    return send_file(
+        buffer,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=filename,
+    )
 
 
-# -------------------------------------------------
-# INICIALIZAR BD AL ARRANCAR
-# -------------------------------------------------
+# =========================
+# Inicialización BD y admin
+# =========================
+
 with app.app_context():
-    inicializar_bd()
+    db.create_all()
+    print("✅ Tablas verificadas o creadas correctamente.")
+
+    try:
+        admin = Usuario.query.filter_by(username="admin").first()
+        if not admin:
+            admin = Usuario(username="admin", es_admin=True)
+            db.session.add(admin)
+
+        # Siempre asegura que la contraseña del admin sea admin123
+        admin.set_password("admin123")
+
+        db.session.commit()
+        print("✅ Usuario admin listo (usuario: admin / contraseña: admin123).")
+    except Exception as e:
+        print(f"[INIT] Error al crear/actualizar admin: {e}")
+        db.session.rollback()
 
 
-# -------------------------------------------------
-# MAIN LOCAL (no afecta a Render)
-# -------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(debug=True)
+
 
 
