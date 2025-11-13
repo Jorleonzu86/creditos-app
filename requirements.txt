@@ -1,7 +1,6 @@
 Flask==3.0.3
 Flask-Login==0.6.3
 Flask-SQLAlchemy==3.1.1
-psycopg2-binary==2.9.9
 passlib==1.7.4
 bcrypt==4.1.2
 fpdf2==2.7.9
