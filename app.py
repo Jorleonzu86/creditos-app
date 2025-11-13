@@ -15,28 +15,18 @@ from flask_login import (
 from werkzeug.security import generate_password_hash, check_password_hash
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-from dotenv import load_dotenv
 
 # =========================
 # Configuración básica
 # =========================
 
-load_dotenv()
-
 app = Flask(__name__)
 
+# Clave de sesión
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-key")
 
-database_url = os.environ.get("DATABASE_URL")
-if database_url:
-    # Arreglo para URLs postgres antiguas
-    if database_url.startswith("postgres://"):
-        database_url = database_url.replace("postgres://", "postgresql://", 1)
-    app.config["SQLALCHEMY_DATABASE_URI"] = database_url
-else:
-    # Fallback local
-    app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///creditos.db"
-
+# BBDD SIEMPRE LOCAL (SQLite) PARA EVITAR psycopg2 / PostgreSQL
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///creditos.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
@@ -44,6 +34,7 @@ migrate = Migrate(app, db)
 
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
+
 
 # =========================
 # Modelos
@@ -145,7 +136,6 @@ def generar_pdf_usuario(usuario: Usuario):
 @app.route("/")
 @login_required
 def index():
-    # Redirige a la pantalla principal de movimientos
     return redirect(url_for("registro_movimientos"))
 
 
