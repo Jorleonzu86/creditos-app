@@ -1,4 +1,3 @@
-# app.py (login robusto + truncado a 72 chars string + logs claros)
 import os
 from datetime import datetime
 from io import BytesIO
@@ -34,9 +33,7 @@ class Usuario(UserMixin):
 
     def check_password(self, password: str) -> bool:
         """
-        Trunca a 72 *caracteres* (bcrypt considera máx 72 bytes; para ASCII simple
-        72 chars == 72 bytes; para unicode complejo passlib igual internamente
-        normaliza. Lo importante es NO pasar secretos de >72).
+        Trunca a 72 *caracteres* (bcrypt usa máx 72 bytes).
         """
         try:
             pw = (password or "")[:72]  # string truncado
@@ -61,15 +58,51 @@ def load_user(user_id):
         print(f"[user_loader] Error cargando user_id={user_id}: {e}")
     return None
 
+# ----------------- Helpers de administración -----------------
+def set_admin_password(new_password: str):
+    """
+    Crea/actualiza el usuario 'admin' con el hash de `new_password`.
+    """
+    phash = bcrypt.hash((new_password or "")[:72])
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO usuarios (username, password_hash, role)
+                VALUES (%s, %s, 'admin')
+                ON CONFLICT (username)
+                DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'admin'
+                """,
+                ("admin", phash),
+            )
+        conn.commit()
+    print("[ADMIN] Password de 'admin' actualizado correctamente.")
+
 # ----------------- Rutas -----------------
 @app.route("/health")
 def health():
     return "OK", 200
 
+# Endpoint temporal protegido para resetear el admin:
+#  - Requiere variable de entorno ADMIN_RESET_TOKEN
+#  - Opcional: ADMIN_RESET_NEW (por defecto 'admin123')
+@app.route("/__admin_reset/<token>", methods=["GET"])
+def admin_reset(token):
+    secret = os.getenv("ADMIN_RESET_TOKEN")
+    if not secret or token != secret:
+        # No filtramos información
+        return "Not found", 404
+    new_pwd = os.getenv("ADMIN_RESET_NEW", "admin123")
+    try:
+        inicializar_bd()  # por si falta la tabla en un primer arranque
+        set_admin_password(new_pwd)
+        return "Admin password reset OK", 200
+    finally:
+        print("[ADMIN] *** IMPORTANTE *** Elimina ADMIN_RESET_TOKEN del entorno y vuelve a desplegar.")
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        # Acepta name="username" o name="usuario"; y "password" o "contrasena"
         username = (request.form.get("username") or request.form.get("usuario") or "").strip()
         password = request.form.get("password") or request.form.get("contrasena") or ""
 
@@ -167,7 +200,7 @@ def detalle_usuario(name):
         saldo = 0
         tabla = []
         for r in registros:
-            saldo += r["monto"] if r["tipo"] == "Compra" else -r["monto"]
+            saldo += r["monto"] si r["tipo"] == "Compra" else -r["monto"]
             tabla.append((r["fecha"], r["producto"], r["tipo"], r["monto"], saldo))
 
     return render_template("usuario.html", user=name, tabla=tabla, saldo=saldo)
