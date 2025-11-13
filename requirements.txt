@@ -2,10 +2,6 @@ flask==3.0.0
 waitress==3.0.0
 reportlab==4.0.7
 flask-login==0.6.3
-passlib[bcrypt]==1.7.4
-bcrypt==3.2.2
-flask-limiter==3.7.0
-flask-talisman==1.1.0
 python-dotenv==1.0.1
 gunicorn==21.2.0
-psycopg[binary]==3.2.8
+psycopg[binary]==3.2.4
