@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Nuevo cliente · Créditos IBafuco{% endblock %}
+
+{% block content %}
+<h1 class="h4 mb-3">Nuevo cliente</h1>
+
+<div class="card">
+    <div class="card-body">
+        <form method="post" action="{{ url_for('cliente_nuevo') }}">
+            <div class="mb-3">
+                <label for="username" class="form-label">Usuario (obligatorio)</label>
+                <input type="text" id="username" name="username"
+                       class="form-control" required>
+            </div>
+
+            <div class="mb-3">
+                <label for="full_name" class="form-label">Nombre completo (opcional)</label>
+                <input type="text" id="full_name" name="full_name"
+                       class="form-control">
+            </div>
+
+            <p class="small text-muted">
+                La contraseña inicial del cliente será <code>1234</code>.  
+                (Se puede cambiar después si lo necesitas.)
+            </p>
+
+            <div class="d-flex justify-content-between">
+                <a href="{{ url_for('clientes_list') }}" class="btn btn-outline-secondary">
+                    Cancelar
+                </a>
+                <button type="submit" class="btn btn-primary">
+                    Guardar cliente
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
