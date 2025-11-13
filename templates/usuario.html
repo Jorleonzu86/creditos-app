@@ -1,67 +1,58 @@
-<!doctype html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <title>Detalle de {{user}}</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 40px;
-      background-color: #f5f5f5;
-    }
-    h2 {
-      color: #0078d7;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      background-color: white;
-      box-shadow: 0 0 8px rgba(0,0,0,0.1);
-    }
-    th {
-      background-color: #0078d7;
-      color: white;
-      padding: 8px;
-    }
-    td {
-      border-bottom: 1px solid #ddd;
-      padding: 6px;
-      text-align: center;
-    }
-    a {
-      color: #0078d7;
-      text-decoration: none;
-    }
-    a:hover {
-      text-decoration: underline;
-    }
-  </style>
-</head>
-<body>
-  <h2>Historial de {{user}}</h2>
+{% extends "base.html" %}
 
-  <table>
-    <tr>
-      <th>Fecha</th>
-      <th>Producto</th>
-      <th>Tipo</th>
-      <th>Monto</th>
-      <th>Saldo acumulado</th>
-    </tr>
-    {% for fila in tabla %}
-    <tr>
-      <td>{{fila[0]}}</td>
-      <td>{{fila[1]}}</td>
-      <td>{{fila[2]}}</td>
-      <td>₡{{fila[3]}}</td>
-      <td>₡{{fila[4]}}</td>
-    </tr>
-    {% endfor %}
-  </table>
+{% block title %}Saldos por Usuario - Crédito-App{% endblock %}
 
-  <p><strong>Saldo actual: ₡{{saldo}}</strong></p>
+{% block content %}
+<h4 class="mb-3">Saldos por usuario</h4>
 
-  <a href="{{ url_for('usuario_pdf', name=user) }}">📄 Generar PDF</a> |
-  <a href="{{ url_for('index') }}">⬅️ Volver</a>
-</body>
-</html>
+<div class="card">
+    <div class="card-body">
+        <div class="table-responsive">
+            <table class="table table-sm table-striped align-middle">
+                <thead class="table-primary">
+                    <tr>
+                        <th>Usuario</th>
+                        <th class="text-end">Saldo</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% if saldos %}
+                    {% for s in saldos %}
+                        <tr>
+                            <td>{{ s.usuario }}</td>
+                            <td class="text-end">
+                                {% if (s.saldo or 0) >= 0 %}
+                                    <span class="text-success fw-semibold">
+                                        ₡ {{ "%.2f"|format(s.saldo or 0) }}
+                                    </span>
+                                {% else %}
+                                    <span class="text-danger fw-semibold">
+                                        ₡ {{ "%.2f"|format(s.saldo or 0) }}
+                                    </span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                {% else %}
+                    <tr>
+                        <td colspan="2" class="text-center text-muted">
+                            No hay movimientos registrados.
+                        </td>
+                    </tr>
+                {% endif %}
+                </tbody>
+            </table>
+        </div>
+
+        <div class="mt-3">
+            <a href="{{ url_for('reporte_pdf') }}" class="btn btn-sm btn-outline-danger me-2">
+                Descargar PDF global
+            </a>
+            <a href="{{ url_for('reporte_excel') }}" class="btn btn-sm btn-outline-success">
+                Exportar Excel global
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
