@@ -1,4 +1,4 @@
-# app.py (robusto: acepta username/usuario y password/contrasena, sin SeaSurf)
+# app.py (login robusto + truncado a 72 chars string + logs claros)
 import os
 from datetime import datetime
 from io import BytesIO
@@ -33,9 +33,17 @@ class Usuario(UserMixin):
         self.role = role
 
     def check_password(self, password: str) -> bool:
+        """
+        Trunca a 72 *caracteres* (bcrypt considera máx 72 bytes; para ASCII simple
+        72 chars == 72 bytes; para unicode complejo passlib igual internamente
+        normaliza. Lo importante es NO pasar secretos de >72).
+        """
         try:
-            pw_bytes = (password or "").encode("utf-8")[:72]  # truncado seguro
-            return bcrypt.verify(pw_bytes, self.password_hash)
+            pw = (password or "")[:72]  # string truncado
+            ok = bcrypt.verify(pw, self.password_hash)
+            if not ok:
+                print(f"[Usuario.check_password] Hash no coincide para user={self.username}")
+            return ok
         except Exception as e:
             print(f"[Usuario.check_password] Error verificando hash: {e}")
             return False
@@ -61,7 +69,7 @@ def health():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        # Acepta name="username" o name="usuario"; password o contrasena
+        # Acepta name="username" o name="usuario"; y "password" o "contrasena"
         username = (request.form.get("username") or request.form.get("usuario") or "").strip()
         password = request.form.get("password") or request.form.get("contrasena") or ""
 
@@ -86,7 +94,6 @@ def login():
                 print(f"[LOGIN] Password inválido para usuario: '{username}'")
                 flash("Usuario o contraseña incorrectos.", "error")
         except Exception as e:
-            # Log detallado para Render → Logs
             print(f"[LOGIN route] Excepción en POST /login para '{username}': {e}")
             flash("Ocurrió un error interno al iniciar sesión.", "error")
 
@@ -112,12 +119,10 @@ def index():
 
             with psycopg.connect(DB_URL) as conn:
                 with conn.cursor() as cur:
-                    # Crear cliente si no existe
                     cur.execute("SELECT id FROM clientes WHERE nombre = %s", (usuario,))
                     if not cur.fetchone():
                         cur.execute("INSERT INTO clientes (nombre) VALUES (%s)", (usuario,))
 
-                    # Registrar movimiento
                     cur.execute(
                         """
                         INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
@@ -174,7 +179,6 @@ def usuario_pdf(name):
     c = canvas.Canvas(buffer, pagesize=A4)
     c.setTitle(f"Estado de cuenta - {name}")
 
-    # Logo y encabezado
     logo_path = os.path.join("static", "ibafuco_logo.jpg")
     if os.path.exists(logo_path):
         c.drawImage(logo_path, 50, 750, width=80, height=80)
