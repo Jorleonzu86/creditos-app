@@ -1,166 +1,93 @@
 import os
+from flask import Flask, render_template, request, redirect, url_for, flash, send_file
+from flask_login import LoginManager, login_user, logout_user, login_required, UserMixin, current_user
+from passlib.hash import bcrypt
+from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 from datetime import datetime
-from io import BytesIO, StringIO
-
-from flask import (
-    Flask,
-    render_template,
-    request,
-    redirect,
-    url_for,
-    flash,
-    send_file,
-    Response,
-)
-from flask_login import (
-    LoginManager,
-    login_user,
-    login_required,
-    logout_user,
-    current_user,
-    UserMixin,
-)
 import psycopg
 from psycopg.rows import dict_row
-from passlib.hash import bcrypt
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-import csv
 
 # -------------------------------------------------
-#  Configuración básica
+# CONFIGURACIÓN BÁSICA
 # -------------------------------------------------
-
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "clave-super-segura")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("Falta la variable de entorno DATABASE_URL")
+DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    raise RuntimeError("No se encontró DATABASE_URL en las variables de entorno.")
 
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "super-secret-key")
-app.config["ENV"] = os.getenv("FLASK_ENV", "production")
-
-login_manager = LoginManager(app)
+login_manager = LoginManager()
+login_manager.init_app(app)
 login_manager.login_view = "login"
 
 
-# -------------------------------------------------
-#  Conexión a la base de datos
-# -------------------------------------------------
-
-def get_conn():
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
-
-
-# -------------------------------------------------
-#  Utilidades de contraseña
-# -------------------------------------------------
-
-def truncate_password(password: str) -> str:
-    """Bcrypt solo acepta hasta 72 bytes. Cortamos de forma segura."""
-    if password is None:
-        return ""
-    return password[:72]
-
-
-def hash_password(plain_password: str) -> str:
-    return bcrypt.hash(truncate_password(plain_password))
-
-
-def verify_password(plain_password: str, password_hash: str) -> bool:
-    try:
-        return bcrypt.verify(truncate_password(plain_password), password_hash)
-    except Exception:
-        # Si el hash estuviera corrupto o con formato raro
-        app.logger.warning("[Usuario.check_password] Error: Invalid hash method ''.")
-        return False
+def get_conn(dict_rows: bool = False):
+    """Devuelve una conexión a Postgres."""
+    if dict_rows:
+        return psycopg.connect(DB_URL, row_factory=dict_row)
+    return psycopg.connect(DB_URL)
 
 
 # -------------------------------------------------
-#  Modelo de usuario para Flask-Login
+# MODELO DE USUARIO PARA FLASK-LOGIN
 # -------------------------------------------------
-
 class Usuario(UserMixin):
     def __init__(self, id, username, password_hash, role):
         self.id = id
         self.username = username
-        self.password_hash = password_hash
-        self.role = role
+        self.password_hash = password_hash or ""
+        self.role = role or "user"
 
-    @property
-    def is_admin(self):
-        return self.role == "admin"
-
-    # --------- Métodos de acceso a BD ----------
-
-    @staticmethod
-    def from_row(row):
-        return Usuario(
-            id=row["id"],
-            username=row["username"],
-            password_hash=row["password_hash"],
-            role=row.get("role", "user"),
-        )
-
-    @staticmethod
-    def get_by_id(user_id):
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, username, password_hash, role FROM usuarios WHERE id = %s",
-                    (user_id,),
+    def check_password(self, password: str) -> bool:
+        """Verifica el password usando bcrypt (truncando a 72 caracteres)."""
+        try:
+            if not self.password_hash:
+                app.logger.warning(
+                    "[Usuario.check_password] password_hash vacío para user=%s",
+                    self.username,
                 )
-                row = cur.fetchone()
-                return Usuario.from_row(row) if row else None
-
-    @staticmethod
-    def get_by_username(username):
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT id, username, password_hash, role FROM usuarios WHERE username = %s",
-                    (username,),
-                )
-                row = cur.fetchone()
-                return Usuario.from_row(row) if row else None
-
-    @staticmethod
-    def create(username, password, role="user"):
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                pw_hash = hash_password(password)
-                cur.execute(
-                    """
-                    INSERT INTO usuarios (username, password_hash, role)
-                    VALUES (%s, %s, %s)
-                    RETURNING id, username, password_hash, role
-                    """,
-                    (username, pw_hash, role),
-                )
-                row = cur.fetchone()
-                conn.commit()
-                return Usuario.from_row(row)
-
-    def check_password(self, password) -> bool:
-        ok = verify_password(password, self.password_hash)
-        if not ok:
-            app.logger.info(
-                "[Usuario.check_password] Hash no coincide para user=%s",
+                return False
+            password = (password or "")[:72]
+            return bcrypt.verify(password, self.password_hash)
+        except Exception as e:
+            app.logger.error(
+                "[Usuario.check_password] Error verificando hash para user=%s: %s",
                 self.username,
+                e,
             )
-        return ok
+            return False
 
 
 @login_manager.user_loader
 def load_user(user_id):
-    return Usuario.get_by_id(user_id)
+    """Carga un usuario por id desde la base de datos."""
+    try:
+        with get_conn(dict_rows=True) as conn:
+            user = conn.execute(
+                "SELECT * FROM usuarios WHERE id = %s",
+                (user_id,),
+            ).fetchone()
+        if user:
+            return Usuario(
+                user["id"],
+                user["username"],
+                user["password_hash"],
+                user["role"],
+            )
+    except Exception as e:
+        app.logger.error("[load_user] Error cargando usuario id=%s: %s", user_id, e)
+    return None
 
 
 # -------------------------------------------------
-#  Creación de tablas (si no existen)
+# INICIALIZACIÓN DE BASE DE DATOS
 # -------------------------------------------------
-
-def create_tables():
+def inicializar_bd():
+    """Crea tablas si no existen y garantiza un usuario admin: admin / admin123."""
+    # Crear tablas
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -169,59 +96,105 @@ def create_tables():
                     id SERIAL PRIMARY KEY,
                     username TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
-                    role TEXT NOT NULL DEFAULT 'user'
+                    role TEXT DEFAULT 'user'
                 );
                 """
             )
-
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS clientes (
+                    id SERIAL PRIMARY KEY,
+                    nombre TEXT UNIQUE NOT NULL
+                );
+                """
+            )
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS movimientos (
                     id SERIAL PRIMARY KEY,
                     usuario TEXT NOT NULL,
                     fecha DATE NOT NULL,
-                    producto TEXT NOT NULL,
-                    tipo TEXT NOT NULL CHECK (tipo IN ('Compra','Abono')),
-                    monto NUMERIC(10,2) NOT NULL
+                    producto TEXT,
+                    tipo TEXT CHECK (tipo IN ('Compra', 'Abono')),
+                    monto NUMERIC NOT NULL
                 );
                 """
             )
+            conn.commit()
 
-        conn.commit()
-        app.logger.info("✅ Tablas verificadas o creadas correctamente.")
+    # Crear o reparar usuario admin
+    with get_conn(dict_rows=True) as conn2:
+        admin = conn2.execute(
+            "SELECT id, password_hash FROM usuarios WHERE username = %s",
+            ("admin",),
+        ).fetchone()
 
-
-with app.app_context():
-    create_tables()
-    # NO tocamos el usuario admin existente para no romper tu login actual.
+        if not admin:
+            # Crear admin con contraseña admin123
+            pwd = bcrypt.hash("admin123"[:72])
+            conn2.execute(
+                "INSERT INTO usuarios (username, password_hash, role) VALUES (%s, %s, %s)",
+                ("admin", pwd, "admin"),
+            )
+            conn2.commit()
+            app.logger.info("[inicializar_bd] Usuario admin creado con password admin123")
+        elif not admin["password_hash"]:
+            # Reparar admin sin hash
+            pwd = bcrypt.hash("admin123"[:72])
+            conn2.execute(
+                "UPDATE usuarios SET password_hash = %s WHERE id = %s",
+                (pwd, admin["id"]),
+            )
+            conn2.commit()
+            app.logger.info(
+                "[inicializar_bd] Hash de usuario admin reparado con password admin123"
+            )
 
 
 # -------------------------------------------------
-#  Rutas de autenticación
+# RUTAS DE AUTENTICACIÓN
 # -------------------------------------------------
-
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    if current_user.is_authenticated:
-        return redirect(url_for("registro_movimientos"))
-
-    error = None
-
     if request.method == "POST":
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
 
-        user = Usuario.get_by_username(username)
-        if user and user.check_password(password):
-            login_user(user)
-            flash("Sesión iniciada correctamente.", "success")
-            next_page = request.args.get("next") or url_for("registro_movimientos")
-            return redirect(next_page)
-        else:
-            error = "Usuario o contraseña incorrectos."
-            flash(error, "danger")
+        if not username or not password:
+            flash("Debe ingresar usuario y contraseña.", "error")
+            return render_template("login.html")
 
-    return render_template("login.html", error=error)
+        try:
+            with get_conn(dict_rows=True) as conn:
+                user = conn.execute(
+                    "SELECT * FROM usuarios WHERE username = %s",
+                    (username,),
+                ).fetchone()
+        except Exception as e:
+            app.logger.error("[LOGIN] Error buscando usuario '%s': %s", username, e)
+            flash("Error interno al buscar usuario.", "error")
+            return render_template("login.html")
+
+        if not user:
+            flash("Usuario o contraseña incorrectos.", "error")
+            return render_template("login.html")
+
+        user_obj = Usuario(
+            user["id"],
+            user["username"],
+            user["password_hash"],
+            user["role"],
+        )
+
+        if user_obj.check_password(password):
+            login_user(user_obj)
+            flash("Inicio de sesión exitoso.", "success")
+            return redirect(url_for("index"))
+        else:
+            flash("Usuario o contraseña incorrectos.", "error")
+            return render_template("login.html")
+
+    return render_template("login.html")
 
 
 @app.route("/logout")
@@ -233,440 +206,227 @@ def logout():
 
 
 # -------------------------------------------------
-#  Vista principal: registro de movimientos
+# RUTA PRINCIPAL: FORMULARIO Y ÚLTIMOS MOVIMIENTOS
 # -------------------------------------------------
-
 @app.route("/", methods=["GET", "POST"])
-@app.route("/form", methods=["GET", "POST"])
-@app.route("/movimientos", methods=["GET", "POST"])
 @login_required
-def registro_movimientos():
-    # ----- Guardar movimiento -----
+def index():
     if request.method == "POST":
-        fecha_str = request.form.get("fecha")
+        usuario = request.form.get("usuario", "").strip()
+        fecha = request.form.get("fecha")
         producto = request.form.get("producto", "").strip()
-        tipo = request.form.get("tipo", "Compra")
-        monto_str = request.form.get("monto", "0").replace(",", ".")
+        tipo = request.form.get("tipo")
+        monto_str = request.form.get("monto", "").strip()
 
-        try:
-            fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
-        except ValueError:
-            try:
-                fecha = datetime.strptime(fecha_str, "%d/%m/%Y").date()
-            except ValueError:
-                flash("Fecha inválida.", "danger")
-                return redirect(url_for("registro_movimientos"))
+        if not usuario or not fecha or not tipo or not monto_str:
+            flash("Todos los campos son obligatorios.", "error")
+            return redirect(url_for("index"))
 
         try:
             monto = float(monto_str)
         except ValueError:
-            flash("Monto inválido.", "danger")
-            return redirect(url_for("registro_movimientos"))
+            flash("El monto debe ser un número válido.", "error")
+            return redirect(url_for("index"))
 
-        if monto <= 0:
-            flash("El monto debe ser mayor a cero.", "danger")
-            return redirect(url_for("registro_movimientos"))
+        try:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    # Asegurar que el cliente exista
+                    cur.execute(
+                        """
+                        INSERT INTO clientes (nombre)
+                        VALUES (%s)
+                        ON CONFLICT (nombre) DO NOTHING;
+                        """,
+                        (usuario,),
+                    )
+                    # Insertar movimiento
+                    cur.execute(
+                        """
+                        INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (usuario, fecha, producto, tipo, monto),
+                    )
+                    conn.commit()
+            flash("Movimiento registrado correctamente.", "success")
+        except Exception as e:
+            app.logger.error("[INDEX POST] Error insertando movimiento: %s", e)
+            flash("Error al registrar el movimiento.", "error")
 
-        if tipo not in ("Compra", "Abono"):
-            flash("Tipo inválido.", "danger")
-            return redirect(url_for("registro_movimientos"))
+        return redirect(url_for("index"))
 
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (current_user.username, fecha, producto, tipo, monto),
-                )
-            conn.commit()
-
-        flash("Movimiento guardado correctamente.", "success")
-        return redirect(url_for("registro_movimientos"))
-
-    # ----- Filtros de búsqueda y paginación -----
-    page = int(request.args.get("page", 1))
-    per_page = 10
-    offset = (page - 1) * per_page
-
-    search = request.args.get("search", "").strip()
-
-    movimientos = []
-    total = 0
-    saldo_actual = 0.0
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            # Suma de saldo del usuario actual
-            cur.execute(
+    # GET: mostrar últimos movimientos
+    try:
+        with get_conn(dict_rows=True) as conn:
+            ultimos = conn.execute(
                 """
-                SELECT
-                    SUM(
-                        CASE
-                            WHEN tipo = 'Abono' THEN monto
-                            WHEN tipo = 'Compra' THEN -monto
-                            ELSE 0
-                        END
-                    ) AS saldo
+                SELECT usuario, fecha, producto, tipo, monto
+                FROM movimientos
+                ORDER BY id DESC
+                LIMIT 10
+                """
+            ).fetchall()
+    except Exception as e:
+        app.logger.error("[INDEX GET] Error consultando últimos movimientos: %s", e)
+        ultimos = []
+
+    hoy = datetime.today().strftime("%Y-%m-%d")
+    return render_template("form.html", ultimos=ultimos, now=hoy)
+
+
+# -------------------------------------------------
+# DETALLE POR USUARIO
+# -------------------------------------------------
+@app.route("/usuario/<name>")
+@login_required
+def detalle_usuario(name):
+    try:
+        with get_conn(dict_rows=True) as conn:
+            registros = conn.execute(
+                """
+                SELECT fecha, producto, tipo, monto
                 FROM movimientos
                 WHERE usuario = %s
+                ORDER BY fecha ASC, id ASC
                 """,
-                (current_user.username,),
-            )
-            row = cur.fetchone()
-            saldo_actual = float(row["saldo"] or 0)
+                (name,),
+            ).fetchall()
+    except Exception as e:
+        app.logger.error("[detalle_usuario] Error consultando usuario '%s': %s", name, e)
+        registros = []
 
-            # Conteo total con filtro
-            if search:
-                cur.execute(
-                    """
-                    SELECT COUNT(*) AS total
-                    FROM movimientos
-                    WHERE usuario = %s
-                    AND (producto ILIKE %s OR tipo ILIKE %s)
-                    """,
-                    (current_user.username, f"%{search}%", f"%{search}%"),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT COUNT(*) AS total
-                    FROM movimientos
-                    WHERE usuario = %s
-                    """,
-                    (current_user.username,),
-                )
-            total = cur.fetchone()["total"]
+    saldo = 0.0
+    tabla = []
 
-            # Lista paginada
-            if search:
-                cur.execute(
-                    """
-                    SELECT id, usuario, fecha, producto, tipo, monto
-                    FROM movimientos
-                    WHERE usuario = %s
-                    AND (producto ILIKE %s OR tipo ILIKE %s)
-                    ORDER BY fecha DESC, id DESC
-                    LIMIT %s OFFSET %s
-                    """,
-                    (
-                        current_user.username,
-                        f"%{search}%",
-                        f"%{search}%",
-                        per_page,
-                        offset,
-                    ),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT id, usuario, fecha, producto, tipo, monto
-                    FROM movimientos
-                    WHERE usuario = %s
-                    ORDER BY fecha DESC, id DESC
-                    LIMIT %s OFFSET %s
-                    """,
-                    (current_user.username, per_page, offset),
-                )
-            movimientos = cur.fetchall()
+    for r in registros:
+        monto = float(r["monto"])
+        if r["tipo"] == "Compra":
+            saldo += monto
+        else:
+            saldo -= monto
 
-    total_pages = max((total - 1) // per_page + 1, 1)
+        fecha_val = r["fecha"]
+        if hasattr(fecha_val, "strftime"):
+            fecha_str = fecha_val.strftime("%d/%m/%Y")
+        else:
+            fecha_str = str(fecha_val)
 
-    return render_template(
-        "form.html",
-        movimientos=movimientos,
-        saldo_actual=saldo_actual,
-        page=page,
-        total_pages=total_pages,
-        search=search,
-    )
+        tabla.append(
+            {
+                "fecha": fecha_str,
+                "producto": r.get("producto", ""),
+                "tipo": r.get("tipo", ""),
+                "monto": monto,
+                "saldo": saldo,
+            }
+        )
+
+    return render_template("usuario.html", user=name, tabla=tabla, saldo=saldo)
 
 
 # -------------------------------------------------
-#  Saldos por usuario (vista admin)
+# PDF POR USUARIO
 # -------------------------------------------------
-
-@app.route("/saldos")
+@app.route("/usuario/<name>/pdf")
 @login_required
-def saldos_usuarios():
-    if not current_user.is_admin:
-        flash("No tienes permisos para ver esta sección.", "danger")
-        return redirect(url_for("registro_movimientos"))
-
-    saldos = []
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT
-                    usuario,
-                    SUM(
-                        CASE
-                            WHEN tipo = 'Abono' THEN monto
-                            WHEN tipo = 'Compra' THEN -monto
-                            ELSE 0
-                        END
-                    ) AS saldo
-                FROM movimientos
-                GROUP BY usuario
-                ORDER BY usuario;
-                """
-            )
-            saldos = cur.fetchall()
-
-    return render_template("usuario.html", saldos=saldos)
-
-
-# -------------------------------------------------
-#  Exportar PDF de movimientos
-# -------------------------------------------------
-
-@app.route("/reportes/pdf")
-@login_required
-def reporte_pdf():
-    usuario = request.args.get("usuario")
-
-    # Usuarios normales solo pueden ver su proprio reporte
-    if not current_user.is_admin:
-        usuario = current_user.username
-
-    movimientos = []
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            if usuario:
-                cur.execute(
-                    """
-                    SELECT usuario, fecha, producto, tipo, monto
-                    FROM movimientos
-                    WHERE usuario = %s
-                    ORDER BY fecha ASC, id ASC
-                    """,
-                    (usuario,),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT usuario, fecha, producto, tipo, monto
-                    FROM movimientos
-                    ORDER BY usuario ASC, fecha ASC, id ASC
-                    """
-                )
-            movimientos = cur.fetchall()
-
+def usuario_pdf(name):
     buffer = BytesIO()
-    p = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
+    c = canvas.Canvas(buffer, pagesize=A4)
+    c.setTitle(f"Estado de cuenta - {name}")
 
-    y = height - 50
-    title = "Reporte de Movimientos"
-    p.setFont("Helvetica-Bold", 16)
-    p.drawString(50, y, title)
-    y -= 30
+    # Logo
+    logo_path = os.path.join(app.root_path, "static", "ibafuco_logo.jpg")
+    if os.path.exists(logo_path):
+        c.drawImage(logo_path, 50, 750, width=80, height=80)
 
-    p.setFont("Helvetica", 10)
-    for mov in movimientos:
-        linea = (
-            f"Usuario: {mov['usuario']} | "
-            f"Fecha: {mov['fecha']} | "
-            f"Prod: {mov['producto']} | "
-            f"Tipo: {mov['tipo']} | "
-            f"Monto: {mov['monto']}"
-        )
-        p.drawString(50, y, linea)
-        y -= 15
-        if y < 50:
-            p.showPage()
-            y = height - 50
-            p.setFont("Helvetica", 10)
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(150, 800, f"Estado de cuenta - {name}")
+    c.setFont("Helvetica", 12)
+    c.drawString(150, 785, "Cocina - Iglesia Bautista Fundamental de Costa Rica")
 
-    p.showPage()
-    p.save()
-    buffer.seek(0)
-
-    filename = "reporte_movimientos.pdf"
-    return send_file(
-        buffer,
-        as_attachment=True,
-        download_name=filename,
-        mimetype="application/pdf",
-    )
-
-
-# -------------------------------------------------
-#  Exportar a Excel (CSV)
-# -------------------------------------------------
-
-@app.route("/reportes/excel")
-@login_required
-def reporte_excel():
-    usuario = request.args.get("usuario")
-
-    if not current_user.is_admin:
-        usuario = current_user.username
-
-    movimientos = []
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            if usuario:
-                cur.execute(
-                    """
-                    SELECT usuario, fecha, producto, tipo, monto
-                    FROM movimientos
-                    WHERE usuario = %s
-                    ORDER BY fecha ASC, id ASC
-                    """,
-                    (usuario,),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT usuario, fecha, producto, tipo, monto
-                    FROM movimientos
-                    ORDER BY usuario ASC, fecha ASC, id ASC
-                    """
-                )
-            movimientos = cur.fetchall()
-
-    si = StringIO()
-    writer = csv.writer(si, delimiter=";", lineterminator="\n")
-    writer.writerow(["Usuario", "Fecha", "Producto", "Tipo", "Monto"])
-    for mov in movimientos:
-        writer.writerow(
-            [
-                mov["usuario"],
-                mov["fecha"].strftime("%Y-%m-%d"),
-                mov["producto"],
-                mov["tipo"],
-                str(mov["monto"]),
-            ]
-        )
-
-    output = si.getvalue()
-    filename = "movimientos.csv"
-    headers = {
-        "Content-Disposition": f"attachment; filename={filename}",
-        "Content-Type": "text/csv; charset=utf-8",
-    }
-    return Response(output, headers=headers)
-
-
-# -------------------------------------------------
-#  Gestión de usuarios (solo admin)
-# -------------------------------------------------
-
-@app.route("/usuarios")
-@login_required
-def lista_usuarios():
-    if not current_user.is_admin:
-        flash("No tienes permisos para ver esta sección.", "danger")
-        return redirect(url_for("registro_movimientos"))
-
-    usuarios = []
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, username, role FROM usuarios ORDER BY username ASC"
-            )
-            usuarios = cur.fetchall()
-
-    return render_template("usuarios_list.html", usuarios=usuarios)
-
-
-@app.route("/usuarios/nuevo", methods=["GET", "POST"])
-@login_required
-def nuevo_usuario():
-    if not current_user.is_admin:
-        flash("No tienes permisos para crear usuarios.", "danger")
-        return redirect(url_for("registro_movimientos"))
-
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
-        role = request.form.get("role", "user")
-
-        if not username or not password:
-            flash("Usuario y contraseña son obligatorios.", "danger")
-            return redirect(url_for("nuevo_usuario"))
-
-        # Crear usuario
-        try:
-            Usuario.create(username=username, password=password, role=role)
-            flash("Usuario creado correctamente.", "success")
-            return redirect(url_for("lista_usuarios"))
-        except psycopg.errors.UniqueViolation:
-            flash("El usuario ya existe.", "danger")
-        except Exception as e:
-            app.logger.error("Error al crear usuario: %s", e)
-            flash("Ocurrió un error al crear el usuario.", "danger")
-
-    return render_template("usuario_nuevo.html")
-
-
-# -------------------------------------------------
-#  Dashboard con gráficas (solo admin)
-# -------------------------------------------------
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    if not current_user.is_admin:
-        flash("No tienes permisos para ver el dashboard.", "danger")
-        return redirect(url_for("registro_movimientos"))
-
-    data = {}
-
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            # Totales
-            cur.execute("SELECT COUNT(*) AS total_usuarios FROM usuarios;")
-            data["total_usuarios"] = cur.fetchone()["total_usuarios"]
-
-            cur.execute("SELECT COUNT(*) AS total_movs FROM movimientos;")
-            data["total_movs"] = cur.fetchone()["total_movs"]
-
-            cur.execute(
+    # Datos
+    try:
+        with get_conn(dict_rows=True) as conn:
+            movimientos = conn.execute(
                 """
-                SELECT
-                    COALESCE(SUM(CASE WHEN tipo = 'Compra' THEN monto ELSE 0 END), 0) AS total_compras,
-                    COALESCE(SUM(CASE WHEN tipo = 'Abono' THEN monto ELSE 0 END), 0) AS total_abonos
-                FROM movimientos;
-                """
-            )
-            row = cur.fetchone()
-            data["total_compras"] = float(row["total_compras"])
-            data["total_abonos"] = float(row["total_abonos"])
-            data["saldo_global"] = data["total_abonos"] - data["total_compras"]
-
-            # Saldos por usuario (para gráfica)
-            cur.execute(
-                """
-                SELECT
-                    usuario,
-                    SUM(
-                        CASE
-                            WHEN tipo = 'Abono' THEN monto
-                            WHEN tipo = 'Compra' THEN -monto
-                            ELSE 0
-                        END
-                    ) AS saldo
+                SELECT fecha, producto, tipo, monto
                 FROM movimientos
-                GROUP BY usuario
-                ORDER BY usuario;
-                """
-            )
-            saldos = cur.fetchall()
-            data["saldos_labels"] = [s["usuario"] for s in saldos]
-            data["saldos_values"] = [float(s["saldo"] or 0) for s in saldos]
+                WHERE usuario = %s
+                ORDER BY fecha ASC, id ASC
+                """,
+                (name,),
+            ).fetchall()
+    except Exception as e:
+        app.logger.error("[usuario_pdf] Error consultando usuario '%s': %s", name, e)
+        movimientos = []
 
-    return render_template("dashboard.html", data=data)
+    y = 740
+    saldo = 0.0
+
+    # Encabezados
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(60, y, "Fecha")
+    c.drawString(130, y, "Producto")
+    c.drawString(320, y, "Tipo")
+    c.drawRightString(430, y, "Monto")
+    c.drawRightString(520, y, "Saldo")
+    c.setFont("Helvetica", 10)
+    y -= 20
+
+    for m in movimientos:
+        if y < 80:
+            c.showPage()
+            y = 800
+            c.setFont("Helvetica-Bold", 11)
+            c.drawString(60, y, "Fecha")
+            c.drawString(130, y, "Producto")
+            c.drawString(320, y, "Tipo")
+            c.drawRightString(430, y, "Monto")
+            c.drawRightString(520, y, "Saldo")
+            c.setFont("Helvetica", 10)
+            y -= 20
+
+        monto = float(m["monto"])
+        if m["tipo"] == "Compra":
+            saldo += monto
+        else:
+            saldo -= monto
+
+        fecha_val = m["fecha"]
+        if hasattr(fecha_val, "strftime"):
+            fecha_str = fecha_val.strftime("%d/%m/%Y")
+        else:
+            fecha_str = str(fecha_val)
+
+        c.drawString(60, y, fecha_str)
+        c.drawString(130, y, m.get("producto", ""))
+        c.drawString(320, y, m.get("tipo", ""))
+        c.drawRightString(430, y, f"₡{monto:,.2f}")
+        c.drawRightString(520, y, f"₡{saldo:,.2f}")
+        y -= 18
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(60, 60, f"Saldo final: ₡{saldo:,.2f}")
+
+    c.save()
+    buffer.seek(0)
+    filename = f"{name}_estado_cuenta.pdf"
+    return send_file(buffer, as_attachment=True, download_name=filename, mimetype="application/pdf")
 
 
 # -------------------------------------------------
-#  Run local (para pruebas)
+# INICIALIZAR BD AL ARRANCAR
 # -------------------------------------------------
+with app.app_context():
+    inicializar_bd()
 
+
+# -------------------------------------------------
+# MAIN LOCAL (no afecta a Render)
+# -------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
