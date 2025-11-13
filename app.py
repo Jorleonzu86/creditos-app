@@ -4,7 +4,7 @@ from io import BytesIO
 
 from flask import Flask, render_template, request, redirect, url_for, flash, send_file
 from flask_login import LoginManager, login_user, logout_user, login_required, UserMixin
-from passlib.hash import bcrypt
+from werkzeug.security import generate_password_hash, check_password_hash
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 import psycopg
@@ -23,6 +23,7 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
 
+
 # ----------------- Modelo de usuario -----------------
 class Usuario(UserMixin):
     def __init__(self, id, username, password_hash, role):
@@ -32,12 +33,8 @@ class Usuario(UserMixin):
         self.role = role
 
     def check_password(self, password: str) -> bool:
-        """
-        Bcrypt usa máx 72 bytes → truncamos a 72 caracteres.
-        """
         try:
-            pw = (password or "")[:72]
-            return bcrypt.verify(pw, self.password_hash)
+            return check_password_hash(self.password_hash, password or "")
         except Exception as e:
             print(f"[Usuario.check_password] Error: {e}")
             return False
@@ -48,23 +45,28 @@ def load_user(user_id):
     try:
         with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
             user = conn.execute(
-                "SELECT * FROM usuarios WHERE id = %s", (user_id,)
+                "SELECT * FROM usuarios WHERE id = %s",
+                (user_id,),
             ).fetchone()
-            if user:
-                return Usuario(
-                    user["id"],
-                    user["username"],
-                    user["password_hash"],
-                    user["role"],
-                )
+        if user:
+            return Usuario(
+                user["id"],
+                user["username"],
+                user["password_hash"],
+                user["role"],
+            )
     except Exception as e:
         print(f"[user_loader] Error: {e}")
     return None
 
 
-# ----------------- Reset de admin -----------------
+# ----------------- Helpers de administración -----------------
 def set_admin_password(new_password: str):
-    phash = bcrypt.hash((new_password or "")[:72])
+    """
+    Crea o actualiza el usuario 'admin' con la contraseña indicada.
+    Usa werkzeug (pbkdf2:sha256), sin bcrypt ni passlib.
+    """
+    phash = generate_password_hash(new_password or "")
     with psycopg.connect(DB_URL) as conn:
         cur = conn.cursor()
         cur.execute(
@@ -72,22 +74,27 @@ def set_admin_password(new_password: str):
             INSERT INTO usuarios (username, password_hash, role)
             VALUES (%s, %s, 'admin')
             ON CONFLICT (username)
-            DO UPDATE SET password_hash = EXCLUDED.password_hash, role='admin'
+            DO UPDATE SET password_hash = EXCLUDED.password_hash,
+                          role = 'admin'
             """,
             ("admin", phash),
         )
         conn.commit()
+    print("[ADMIN] Password de 'admin' actualizado correctamente.")
 
 
 @app.route("/__admin_reset/<token>")
 def admin_reset(token):
+    """
+    Endpoint para resetear el usuario admin sin tocar Neon.
+    Protegido por la variable de entorno ADMIN_RESET_TOKEN.
+    """
     secret = os.getenv("ADMIN_RESET_TOKEN")
     if not secret or token != secret:
         return "Not found", 404
 
     new_pwd = os.getenv("ADMIN_RESET_NEW", "admin123")
     set_admin_password(new_pwd)
-
     return f"Admin reset OK. Nueva contraseña: {new_pwd}", 200
 
 
@@ -95,13 +102,13 @@ def admin_reset(token):
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
 
         try:
             with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
                 user = conn.execute(
-                    "SELECT * FROM usuarios WHERE username=%s",
+                    "SELECT * FROM usuarios WHERE username = %s",
                     (username,),
                 ).fetchone()
 
@@ -110,11 +117,15 @@ def login():
                 return render_template("login.html")
 
             user_obj = Usuario(
-                user["id"], user["username"], user["password_hash"], user["role"]
+                user["id"],
+                user["username"],
+                user["password_hash"],
+                user["role"],
             )
 
             if user_obj.check_password(password):
                 login_user(user_obj)
+                flash("Inicio de sesión exitoso.", "success")
                 return redirect(url_for("index"))
             else:
                 flash("Usuario o contraseña incorrectos.", "error")
@@ -139,9 +150,9 @@ def logout():
 def index():
     if request.method == "POST":
         try:
-            usuario = request.form["usuario"]
+            usuario = request.form["usuario"].strip()
             fecha = request.form["fecha"]
-            producto = request.form["producto"]
+            producto = request.form["producto"].strip()
             tipo = request.form["tipo"]
             monto = float(request.form["monto"])
 
@@ -149,13 +160,14 @@ def index():
                 cur = conn.cursor()
 
                 # Crear cliente si no existe
-                cur.execute("SELECT id FROM clientes WHERE nombre=%s", (usuario,))
+                cur.execute("SELECT id FROM clientes WHERE nombre = %s", (usuario,))
                 if not cur.fetchone():
                     cur.execute(
                         "INSERT INTO clientes (nombre) VALUES (%s)",
                         (usuario,),
                     )
 
+                # Insertar movimiento
                 cur.execute(
                     """
                     INSERT INTO movimientos (usuario, fecha, producto, tipo, monto)
@@ -198,24 +210,28 @@ def detalle_usuario(name):
             """
             SELECT fecha, producto, tipo, monto
             FROM movimientos
-            WHERE usuario=%s
+            WHERE usuario = %s
             ORDER BY fecha ASC
             """,
             (name,),
         ).fetchall()
 
-    saldo = 0
+    saldo = 0.0
     tabla = []
 
     for r in registros:
-        # ← ← ← AQUÍ ESTABA EL ERROR (si → if)
-        saldo += r["monto"] if r["tipo"] == "Compra" else -r["monto"]
+        monto = float(r["monto"])
+        if r["tipo"] == "Compra":
+            saldo += monto
+        else:  # Abono
+            saldo -= monto
+
         tabla.append(
             (
                 r["fecha"],
                 r["producto"],
                 r["tipo"],
-                r["monto"],
+                monto,
                 saldo,
             )
         )
@@ -228,6 +244,7 @@ def detalle_usuario(name):
 def usuario_pdf(name):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
+    c.setTitle(f"Estado de cuenta - {name}")
 
     logo_path = os.path.join("static", "ibafuco_logo.jpg")
     if os.path.exists(logo_path):
@@ -235,40 +252,53 @@ def usuario_pdf(name):
 
     c.setFont("Helvetica-Bold", 16)
     c.drawString(150, 800, f"Estado de cuenta - {name}")
+    c.setFont("Helvetica", 12)
+    c.drawString(150, 785, "Cocina - Iglesia Bautista Fundamental de Costa Rica")
 
     with psycopg.connect(DB_URL, row_factory=dict_row) as conn:
         movs = conn.execute(
             """
             SELECT fecha, producto, tipo, monto
             FROM movimientos
-            WHERE usuario=%s
+            WHERE usuario = %s
             ORDER BY fecha ASC
             """,
             (name,),
         ).fetchall()
 
     y = 740
-    saldo = 0
+    saldo = 0.0
 
     for m in movs:
-        y -= 20
-        if y < 100:
+        if y < 120:
             c.showPage()
             y = 800
 
-        saldo += m["monto"] if m["tipo"] == "Compra" else -m["monto"]
+        monto = float(m["monto"])
+        if m["tipo"] == "Compra":
+            saldo += monto
+        else:
+            saldo -= monto
 
         c.setFont("Helvetica", 10)
         c.drawString(60, y, m["fecha"].strftime("%d/%m/%Y"))
         c.drawString(140, y, m["producto"])
         c.drawString(300, y, m["tipo"])
-        c.drawRightString(500, y, f"₡{m['monto']:.2f}")
+        c.drawRightString(500, y, f"₡{monto:.2f}")
         c.drawRightString(560, y, f"₡{saldo:.2f}")
+        y -= 20
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(60, 80, f"Saldo final: ₡{saldo:.2f}")
 
     c.save()
     buffer.seek(0)
 
-    return send_file(buffer, download_name=f"{name}.pdf", as_attachment=True)
+    return send_file(
+        buffer,
+        download_name=f"{name}_estado_cuenta.pdf",
+        as_attachment=True,
+    )
 
 
 # ----------------- Init DB -----------------
@@ -314,5 +344,6 @@ if __name__ == "__main__":
     inicializar_bd()
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
 
 
