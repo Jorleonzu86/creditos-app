@@ -4,12 +4,12 @@
 
 {% block content %}
 <div class="row justify-content-center">
-    <div class="col-md-6">
+    <div class="col-md-6 col-lg-5">
         <div class="card">
             <div class="card-body">
                 <h4 class="mb-3">Crear nuevo usuario</h4>
 
-                <form method="post" action="{{ url_for('nuevo_usuario') }}">
+                <form method="post" action="{{ url_for('usuario_nuevo') }}">
                     <div class="mb-3">
                         <label for="username" class="form-label">Usuario</label>
                         <input type="text" class="form-control" id="username"
@@ -45,3 +45,4 @@
     </div>
 </div>
 {% endblock %}
+
