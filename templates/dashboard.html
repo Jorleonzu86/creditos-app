@@ -3,7 +3,7 @@
 {% block title %}Dashboard - Crédito-App{% endblock %}
 
 {% block head_extra %}
-    <!-- Chart.js -->
+    <!-- Chart.js para las gráficas -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
             integrity="sha256-Jpc4zFoVXcfT1K+kZPOHiIVVGNBL1esovh0B9hC3X6E="
             crossorigin="anonymous"></script>
@@ -21,6 +21,7 @@
             </div>
         </div>
     </div>
+
     <div class="col-md-3 mb-3">
         <div class="card border-0 shadow-sm">
             <div class="card-body">
@@ -29,6 +30,7 @@
             </div>
         </div>
     </div>
+
     <div class="col-md-3 mb-3">
         <div class="card border-0 shadow-sm">
             <div class="card-body">
@@ -37,6 +39,7 @@
             </div>
         </div>
     </div>
+
     <div class="col-md-3 mb-3">
         <div class="card border-0 shadow-sm">
             <div class="card-body">
@@ -90,7 +93,7 @@
     const saldosLabels = {{ data.saldos_labels|tojson }};
     const saldosValues = {{ data.saldos_values|tojson }};
 
-    // Compras vs Abonos
+    // Gráfica: Compras vs Abonos
     const ctxTotals = document.getElementById('chartTotals');
     if (ctxTotals) {
         new Chart(ctxTotals, {
@@ -109,7 +112,7 @@
         });
     }
 
-    // Saldos por usuario
+    // Gráfica: Saldos por usuario
     const ctxSaldos = document.getElementById('chartSaldos');
     if (ctxSaldos) {
         new Chart(ctxSaldos, {
@@ -133,3 +136,4 @@
     }
 </script>
 {% endblock %}
+
