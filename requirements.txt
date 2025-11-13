@@ -1,27 +1,8 @@
 Flask==3.0.3
 Flask-Login==0.6.3
-Flask-SQLAlchemy==3.1.1
-Flask-Migrate==4.0.5
-
-# Hash de contraseñas
 passlib==1.7.4
 bcrypt==4.1.2
-
-# Para Excel
-pandas==2.2.2
-openpyxl==3.1.2
-
-# Para PDF
 reportlab==4.2.2
-
-# Base de datos SQLite correcta
-SQLAlchemy==2.0.20
-
-# Producción (Render)
 gunicorn==21.2.0
+psycopg[binary]==3.2.12
 
-# Seguridad
-itsdangerous==2.2.0
-
-# JSON para gráficos
-simplejson==3.19.2
