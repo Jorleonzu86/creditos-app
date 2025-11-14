@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3">Reportes (solo admin)</h3>
+
+<div class="card shadow-sm mb-4">
+  <div class="card-body">
+    <h5 class="card-title">Resumen global</h5>
+    <p class="mb-1"><strong>Total adeudado:</strong> ₡ {{ "%.2f"|format(total_deuda) }}</p>
+    <p class="mb-3"><strong>Clientes activos:</strong> {{ clientes|length }}</p>
+    <a href="{{ url_for('reporte_global_pdf') }}" class="btn btn-sm btn-outline-secondary me-2">
+      Descargar PDF global
+    </a>
+    <a href="{{ url_for('reporte_global_excel') }}" class="btn btn-sm btn-outline-success">
+      Descargar Excel global
+    </a>
+  </div>
+</div>
+
+<h5 class="mb-2">Top 10 clientes que más deben</h5>
+<div class="card shadow-sm mb-4">
+  <div class="card-body">
+    {% if top10 %}
+    <div class="table-responsive">
+      <table class="table table-sm table-striped align-middle">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Cliente</th>
+            <th>Saldo</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in top10 %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td>{{ c.nombre }}</td>
+            <td>₡ {{ "%.2f"|format(c.saldo) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+      <p class="text-muted mb-0">No hay clientes con saldo pendiente.</p>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
