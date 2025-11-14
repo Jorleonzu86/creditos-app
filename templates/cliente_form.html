@@ -1,39 +1,48 @@
 {% extends "base.html" %}
 
-{% block title %}Nuevo cliente · Créditos IBafuco{% endblock %}
+{% block title %}{{ "Editar Cliente" if cliente else "Nuevo Cliente" }}{% endblock %}
 
 {% block content %}
-<h1 class="h4 mb-3">Nuevo cliente</h1>
+<div class="container mt-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h2 class="mb-0">
+      {{ "Editar Cliente" if cliente else "Nuevo Cliente" }}
+    </h2>
+    <a href="{{ url_for('lista_clientes') }}" class="btn btn-secondary btn-sm">
+      ← Volver a la lista de clientes
+    </a>
+  </div>
 
-<div class="card">
+  <div class="card shadow-sm">
     <div class="card-body">
-        <form method="post" action="{{ url_for('cliente_nuevo') }}">
-            <div class="mb-3">
-                <label for="username" class="form-label">Usuario (obligatorio)</label>
-                <input type="text" id="username" name="username"
-                       class="form-control" required>
-            </div>
+      <form method="post">
+        {{ csrf_token() if csrf_token is defined }}
 
-            <div class="mb-3">
-                <label for="full_name" class="form-label">Nombre completo (opcional)</label>
-                <input type="text" id="full_name" name="full_name"
-                       class="form-control">
-            </div>
+        <!-- SOLO NOMBRE, requerido -->
+        <div class="mb-3">
+          <label for="nombre" class="form-label">Nombre completo del cliente</label>
+          <input
+            type="text"
+            class="form-control"
+            id="nombre"
+            name="nombre"
+            required
+            placeholder="Ej: María Pérez López"
+            value="{{ cliente.nombre if cliente else '' }}"
+          >
+        </div>
 
-            <p class="small text-muted">
-                La contraseña inicial del cliente será <code>1234</code>.  
-                (Se puede cambiar después si lo necesitas.)
-            </p>
-
-            <div class="d-flex justify-content-between">
-                <a href="{{ url_for('clientes_list') }}" class="btn btn-outline-secondary">
-                    Cancelar
-                </a>
-                <button type="submit" class="btn btn-primary">
-                    Guardar cliente
-                </button>
-            </div>
-        </form>
+        <div class="d-flex justify-content-end gap-2">
+          <a href="{{ url_for('lista_clientes') }}" class="btn btn-outline-secondary">
+            Cancelar
+          </a>
+          <button type="submit" class="btn btn-primary">
+            Guardar
+          </button>
+        </div>
+      </form>
     </div>
+  </div>
 </div>
 {% endblock %}
+
