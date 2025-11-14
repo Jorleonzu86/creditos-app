@@ -1,139 +1,63 @@
 {% extends "base.html" %}
-
-{% block title %}Dashboard - Crédito-App{% endblock %}
-
-{% block head_extra %}
-    <!-- Chart.js para las gráficas -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
-            integrity="sha256-Jpc4zFoVXcfT1K+kZPOHiIVVGNBL1esovh0B9hC3X6E="
-            crossorigin="anonymous"></script>
-{% endblock %}
-
 {% block content %}
-<h4 class="mb-3">Dashboard</h4>
+<h3 class="mb-4">Dashboard</h3>
 
 <div class="row mb-4">
-    <div class="col-md-3 mb-3">
-        <div class="card border-0 shadow-sm">
-            <div class="card-body">
-                <p class="text-muted mb-1">Usuarios</p>
-                <h4 class="mb-0">{{ data.total_usuarios }}</h4>
-            </div>
-        </div>
+  <div class="col-md-4">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="card-title">Deuda total</h5>
+        <p class="display-6 text-danger">
+          ₡ {{ "%.2f"|format(total_deuda) }}
+        </p>
+      </div>
     </div>
-
-    <div class="col-md-3 mb-3">
-        <div class="card border-0 shadow-sm">
-            <div class="card-body">
-                <p class="text-muted mb-1">Movimientos</p>
-                <h4 class="mb-0">{{ data.total_movs }}</h4>
-            </div>
-        </div>
+  </div>
+  <div class="col-md-4">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="card-title">Clientes activos</h5>
+        <p class="display-6">
+          {{ clientes|length }}
+        </p>
+      </div>
     </div>
-
-    <div class="col-md-3 mb-3">
-        <div class="card border-0 shadow-sm">
-            <div class="card-body">
-                <p class="text-muted mb-1">Total Compras</p>
-                <h4 class="mb-0 text-danger">₡ {{ "%.2f"|format(data.total_compras) }}</h4>
-            </div>
-        </div>
-    </div>
-
-    <div class="col-md-3 mb-3">
-        <div class="card border-0 shadow-sm">
-            <div class="card-body">
-                <p class="text-muted mb-1">Total Abonos</p>
-                <h4 class="mb-0 text-success">₡ {{ "%.2f"|format(data.total_abonos) }}</h4>
-            </div>
-        </div>
-    </div>
+  </div>
 </div>
 
-<div class="row">
-    <div class="col-lg-6 mb-4">
-        <div class="card border-0 shadow-sm">
-            <div class="card-body">
-                <h6 class="card-title">Compras vs Abonos</h6>
-                <canvas id="chartTotals"></canvas>
-            </div>
-        </div>
+<h5 class="mt-4 mb-2">Top 10 clientes que más deben</h5>
+<div class="card shadow-sm mb-4">
+  <div class="card-body">
+    {% if top10 %}
+    <div class="table-responsive">
+      <table class="table table-sm table-striped align-middle">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Cliente</th>
+            <th>Saldo</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in top10 %}
+          <tr>
+            <td>{{ loop.index }}</td>
+            <td>
+              <a href="{{ url_for('cliente_detalle', cliente_id=c.id) }}">
+                {{ c.nombre }}
+              </a>
+            </td>
+            <td>₡ {{ "%.2f"|format(c.saldo) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
     </div>
-
-    <div class="col-lg-6 mb-4">
-        <div class="card border-0 shadow-sm">
-            <div class="card-body">
-                <h6 class="card-title">Saldo por usuario</h6>
-                <canvas id="chartSaldos"></canvas>
-            </div>
-        </div>
-    </div>
+    {% else %}
+      <p class="text-muted mb-0">No hay clientes con saldo pendiente.</p>
+    {% endif %}
+  </div>
 </div>
 
-<div class="card border-0 shadow-sm">
-    <div class="card-body">
-        <h6>Saldo global</h6>
-        {% if data.saldo_global >= 0 %}
-            <span class="badge bg-success saldo-badge">
-                ₡ {{ "%.2f"|format(data.saldo_global) }}
-            </span>
-        {% else %}
-            <span class="badge bg-danger saldo-badge">
-                ₡ {{ "%.2f"|format(data.saldo_global) }}
-            </span>
-        {% endif %}
-    </div>
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-    const totalCompras = {{ data.total_compras|tojson }};
-    const totalAbonos  = {{ data.total_abonos|tojson }};
-    const saldosLabels = {{ data.saldos_labels|tojson }};
-    const saldosValues = {{ data.saldos_values|tojson }};
-
-    // Gráfica: Compras vs Abonos
-    const ctxTotals = document.getElementById('chartTotals');
-    if (ctxTotals) {
-        new Chart(ctxTotals, {
-            type: 'doughnut',
-            data: {
-                labels: ['Compras', 'Abonos'],
-                datasets: [{
-                    data: [totalCompras, totalAbonos],
-                }]
-            },
-            options: {
-                plugins: {
-                    legend: { position: 'bottom' }
-                }
-            }
-        });
-    }
-
-    // Gráfica: Saldos por usuario
-    const ctxSaldos = document.getElementById('chartSaldos');
-    if (ctxSaldos) {
-        new Chart(ctxSaldos, {
-            type: 'bar',
-            data: {
-                labels: saldosLabels,
-                datasets: [{
-                    label: 'Saldo',
-                    data: saldosValues,
-                }]
-            },
-            options: {
-                scales: {
-                    y: { beginAtZero: true }
-                },
-                plugins: {
-                    legend: { display: false }
-                }
-            }
-        });
-    }
-</script>
 {% endblock %}
 
