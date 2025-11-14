@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block content %}
+<h3 class="mb-3">Cliente: {{ cliente.nombre }}</h3>
+
+<div class="row">
+  <div class="col-md-4">
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h5 class="card-title">Datos del cliente</h5>
+        <p class="mb-1"><strong>Identificación:</strong> {{ cliente.identificacion or '—' }}</p>
+        <p class="mb-1"><strong>Teléfono:</strong> {{ cliente.telefono or '—' }}</p>
+        <p class="mb-1"><strong>Cobrador:</strong>
+          {% if cliente.cobrador %}
+            {{ cliente.cobrador.full_name }}
+          {% else %}
+            No asignado
+          {% endif %}
+        </p>
+        <p class="mb-1"><strong>Total créditos:</strong> ₡ {{ "%.2f"|format(cliente.total_creditos) }}</p>
+        <p class="mb-1"><strong>Total abonos:</strong> ₡ {{ "%.2f"|format(cliente.total_abonos) }}</p>
+        <p class="mb-1"><strong>Saldo:</strong>
+          <span class="fw-bold {% if cliente.saldo > 0 %}text-danger{% else %}text-success{% endif %}">
+            ₡ {{ "%.2f"|format(cliente.saldo) }}
+          </span>
+        </p>
+        {% if current_user.role == 'admin' %}
+        <hr>
+        <a href="{{ url_for('cliente_pdf', cliente_id=cliente.id) }}" class="btn btn-sm btn-outline-secondary">Descargar PDF</a>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h5 class="card-title">Nuevo movimiento</h5>
+        <form method="post">
+          <div class="mb-3">
+            <label class="form-label">Fecha</label>
+            <input type="date" name="fecha" class="form-control" value="{{ now().strftime('%Y-%m-%d') if false }}">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Tipo</label>
+            <select name="tipo" class="form-select" required>
+              <option value="COMPRA">Compra (aumenta deuda)</option>
+              <option value="ABONO">Abono (reduce deuda)</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Monto</label>
+            <input type="number" step="0.01" min="0" name="monto" class="form-control" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Descripción</label>
+            <input type="text" name="descripcion" class="form-control">
+          </div>
+          <button type="submit" class="btn btn-primary w-100">Registrar</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-8">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="card-title">Movimientos</h5>
+        {% if movimientos %}
+        <div class="table-responsive">
+          <table class="table table-sm table-striped align-middle">
+            <thead>
+              <tr>
+                <th>Fecha</th>
+                <th>Tipo</th>
+                <th>Monto</th>
+                <th>Descripción</th>
+                <th>Registrado por</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for m in movimientos %}
+              <tr>
+                <td>{{ m.fecha.strftime('%d/%m/%Y') }}</td>
+                <td>
+                  {% if m.tipo == 'COMPRA' %}
+                    <span class="badge bg-danger">COMPRA</span>
+                  {% else %}
+                    <span class="badge bg-success">ABONO</span>
+                  {% endif %}
+                </td>
+                <td>₡ {{ "%.2f"|format(m.monto) }}</td>
+                <td>{{ m.descripcion or '' }}</td>
+                <td>{{ m.usuario.full_name if m.usuario else '—' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="text-muted mb-0">Aún no hay movimientos para este cliente.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
