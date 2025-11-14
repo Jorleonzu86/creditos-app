@@ -1,45 +1,87 @@
 {% extends "base.html" %}
-
-{% block title %}Usuarios del sistema · Créditos IBafuco{% endblock %}
-
 {% block content %}
-<h1 class="h4 mb-3">Usuarios del sistema</h1>
+<h3 class="mb-3">Gestión de usuarios (solo admin)</h3>
 
-<div class="card">
-    <div class="card-body">
-        {% if usuarios %}
-            <div class="table-responsive">
-                <table class="table table-striped align-middle mb-0">
-                    <thead>
-                    <tr>
-                        <th>Usuario</th>
-                        <th>Nombre completo</th>
-                        <th>Rol</th>
-                        <th>Saldo (si es cliente)</th>
-                    </tr>
-                    </thead>
-                    <tbody>
-                    {% for u in usuarios %}
-                        <tr>
-                            <td>{{ u.username }}</td>
-                            <td>{{ u.full_name or "-" }}</td>
-                            <td>{{ u.role }}</td>
-                            <td>
-                                {% if u.role == 'cliente' %}
-                                    {{ "%.2f"|format(u.saldo()) }}
-                                {% else %}
-                                    -
-                                {% endif %}
-                            </td>
-                        </tr>
-                    {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        {% else %}
-            <p class="mb-0">No hay usuarios registrados.</p>
-        {% endif %}
+<div class="row">
+  <div class="col-md-5">
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h5 class="card-title">Nuevo usuario</h5>
+        <form method="post">
+          <div class="mb-3">
+            <label class="form-label">Usuario</label>
+            <input type="text" name="username" class="form-control" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Nombre completo</label>
+            <input type="text" name="full_name" class="form-control" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Contraseña</label>
+            <input type="password" name="password" class="form-control" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Rol</label>
+            <select name="role" class="form-select">
+              <option value="cobrador" selected>Cobrador</option>
+              <option value="admin">Administrador</option>
+            </select>
+          </div>
+          <button type="submit" class="btn btn-primary">Crear usuario</button>
+        </form>
+      </div>
     </div>
+  </div>
+
+  <div class="col-md-7">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="card-title">Usuarios registrados</h5>
+        {% if usuarios %}
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Usuario</th>
+                <th>Nombre</th>
+                <th>Rol</th>
+                <th>Estado</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for u in usuarios %}
+              <tr>
+                <td>{{ u.username }}</td>
+                <td>{{ u.full_name }}</td>
+                <td>{{ u.role }}</td>
+                <td>
+                  {% if u.active %}
+                    <span class="badge bg-success">Activo</span>
+                  {% else %}
+                    <span class="badge bg-secondary">Inactivo</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if u.username != 'admin' %}
+                  <form method="post" action="{{ url_for('usuario_toggle', user_id=u.id) }}" style="display:inline;">
+                    <button type="submit" class="btn btn-sm btn-outline-warning">
+                      {% if u.active %}Desactivar{% else %}Activar{% endif %}
+                    </button>
+                  </form>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="text-muted mb-0">No hay usuarios.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
