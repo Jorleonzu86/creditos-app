@@ -6,3 +6,4 @@ passlib[bcrypt]==1.7.4
 bcrypt==3.2.2
 gunicorn==21.2.0
 fpdf2==2.7.9
+reportlab==4.2.5
