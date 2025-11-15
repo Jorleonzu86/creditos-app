@@ -5,9 +5,14 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h2>Cliente: {{ cliente.nombre }}</h2>
-  <a href="{{ url_for('clientes') }}" class="btn btn-secondary btn-sm">
-    ← Volver a la lista
-  </a>
+  <div>
+    <a href="{{ url_for('cliente_pdf', cliente_id=cliente.id) }}" class="btn btn-outline-secondary btn-sm me-2">
+      Descargar PDF
+    </a>
+    <a href="{{ url_for('clientes') }}" class="btn btn-secondary btn-sm">
+      ← Volver a la lista
+    </a>
+  </div>
 </div>
 
 <div class="card mb-4">
@@ -40,12 +45,16 @@
 
           <div class="mb-3">
             <label class="form-label">Fecha</label>
-            <input type="date" name="fecha" class="form-control" value="{{ date.today().isoformat() }}">
+            <input type="date"
+                   name="fecha"
+                   class="form-control"
+                   value="{{ date.today().isoformat() }}">
           </div>
 
           <div class="mb-3">
             <label class="form-label">Descripción (opcional)</label>
-            <input type="text" name="descripcion" class="form-control" placeholder="Ej: compra de ropa, abono en efectivo">
+            <input type="text" name="descripcion" class="form-control"
+                   placeholder="Ej: compra de ropa, abono en efectivo">
           </div>
 
           <button type="submit" class="btn btn-primary">Guardar movimiento</button>
