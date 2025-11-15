@@ -1,88 +1,98 @@
 {% extends "base.html" %}
+
+{% block title %}Usuarios{% endblock %}
+
 {% block content %}
-<h3 class="mb-3">Gestión de usuarios (solo admin)</h3>
+<h2>Usuarios</h2>
 
-<div class="row">
-  <div class="col-md-5">
-    <div class="card shadow-sm mb-4">
-      <div class="card-body">
-        <h5 class="card-title">Nuevo usuario</h5>
-        <form method="post">
-          <div class="mb-3">
-            <label class="form-label">Usuario</label>
-            <input type="text" name="username" class="form-control" required>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">Nombre completo</label>
-            <input type="text" name="full_name" class="form-control" required>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">Contraseña</label>
-            <input type="password" name="password" class="form-control" required>
-          </div>
-          <div class="mb-3">
-            <label class="form-label">Rol</label>
-            <select name="role" class="form-select">
-              <option value="cobrador" selected>Cobrador</option>
-              <option value="admin">Administrador</option>
-            </select>
-          </div>
-          <button type="submit" class="btn btn-primary">Crear usuario</button>
-        </form>
-      </div>
-    </div>
+<div class="card mb-4 mt-3">
+  <div class="card-header">
+    Nuevo usuario
   </div>
-
-  <div class="col-md-7">
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h5 class="card-title">Usuarios registrados</h5>
-        {% if usuarios %}
-        <div class="table-responsive">
-          <table class="table table-sm align-middle">
-            <thead>
-              <tr>
-                <th>Usuario</th>
-                <th>Nombre</th>
-                <th>Rol</th>
-                <th>Estado</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for u in usuarios %}
-              <tr>
-                <td>{{ u.username }}</td>
-                <td>{{ u.full_name }}</td>
-                <td>{{ u.role }}</td>
-                <td>
-                  {% if u.active %}
-                    <span class="badge bg-success">Activo</span>
-                  {% else %}
-                    <span class="badge bg-secondary">Inactivo</span>
-                  {% endif %}
-                </td>
-                <td>
-                  {% if u.username != 'admin' %}
-                  <form method="post" action="{{ url_for('usuario_toggle', user_id=u.id) }}" style="display:inline;">
-                    <button type="submit" class="btn btn-sm btn-outline-warning">
-                      {% if u.active %}Desactivar{% else %}Activar{% endif %}
-                    </button>
-                  </form>
-                  {% endif %}
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+  <div class="card-body">
+    <form method="post">
+      <div class="row">
+        <div class="col-md-4 mb-3">
+          <label class="form-label">Usuario</label>
+          <input type="text" name="username" class="form-control" required>
         </div>
-        {% else %}
-        <p class="text-muted mb-0">No hay usuarios.</p>
-        {% endif %}
+        <div class="col-md-4 mb-3">
+          <label class="form-label">Contraseña</label>
+          <input type="password" name="password" class="form-control" required>
+        </div>
+        <div class="col-md-4 mb-3 d-flex align-items-center mt-4">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="es_admin" id="es_admin">
+            <label class="form-check-label" for="es_admin">
+              Es administrador
+            </label>
+          </div>
+        </div>
       </div>
-    </div>
+      <button type="submit" class="btn btn-primary">Crear usuario</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    Lista de usuarios
+  </div>
+  <div class="card-body">
+    {% if usuarios %}
+      <table class="table table-hover">
+        <thead>
+          <tr>
+            <th>Usuario</th>
+            <th>Admin</th>
+            <th>Activo</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in usuarios %}
+            <tr>
+              <td>{{ u.username }}</td>
+              <td>
+                {% if u.es_admin %}
+                  <span class="badge bg-primary">Admin</span>
+                {% else %}
+                  <span class="badge bg-secondary">Usuario</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if u.activo %}
+                  <span class="badge bg-success">Activo</span>
+                {% else %}
+                  <span class="badge bg-danger">Inactivo</span>
+                {% endif %}
+              </td>
+              <td>
+                <form method="post"
+                      action="{{ url_for('toggle_usuario', usuario_id=u.id) }}"
+                      style="display:inline;">
+                  <button class="btn btn-sm btn-outline-secondary">
+                    {% if u.activo %}Desactivar{% else %}Activar{% endif %}
+                  </button>
+                </form>
+
+                <form method="post"
+                      action="{{ url_for('reset_password', usuario_id=u.id) }}"
+                      style="display:inline;">
+                  <button class="btn btn-sm btn-outline-warning"
+                          onclick="return confirm('¿Resetear contraseña a 123456?');">
+                    Resetear contraseña
+                  </button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="text-muted">No hay usuarios.</p>
+    {% endif %}
   </div>
 </div>
 {% endblock %}
-
 
