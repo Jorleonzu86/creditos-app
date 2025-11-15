@@ -1,8 +1,6 @@
 import os
-from datetime import date, datetime
 from decimal import Decimal
-from functools import wraps
-from io import BytesIO
+from datetime import date
 
 from flask import (
     Flask,
@@ -12,34 +10,33 @@ from flask import (
     request,
     flash,
     send_file,
+    abort,
 )
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import (
     LoginManager,
+    UserMixin,
     login_user,
     logout_user,
     login_required,
     current_user,
-    UserMixin,
 )
-from passlib.hash import bcrypt
-from reportlab.lib.pagesizes import letter
+from werkzeug.security import generate_password_hash, check_password_hash
+
 from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
 
 # -------------------------------------------------------------------
-# CONFIGURACIÓN BÁSICA
+# Configuración básica
 # -------------------------------------------------------------------
-
 app = Flask(__name__)
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "cambia-esta-clave")
 
-# Clave secreta (puedes cambiarla o ponerla como variable de entorno)
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "super-secret-dev-key")
-
-# IMPORTANTÍSIMO: Usar SIEMPRE SQLite para evitar psycopg2 / Postgres
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-db_path = os.path.join(BASE_DIR, "creditos.db")
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{db_path}"
-
+# Render usa DATABASE_URL
+db_url = os.environ.get("DATABASE_URL", "sqlite:///creditos.db")
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
@@ -49,127 +46,357 @@ login_manager.login_view = "login"
 
 
 # -------------------------------------------------------------------
-# MODELOS
+# Modelos
 # -------------------------------------------------------------------
-
-class User(db.Model, UserMixin):
-    __tablename__ = "user"
+class Usuario(UserMixin, db.Model):
+    __tablename__ = "usuarios"
 
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(50), unique=True, nullable=False)
-    full_name = db.Column(db.String(100), nullable=False)
-    password_hash = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.String(20), nullable=False, default="cobrador")  # admin / cobrador
-    active = db.Column(db.Boolean, default=True)
+    password_hash = db.Column(db.String(200), nullable=False)
+    es_admin = db.Column(db.Boolean, default=False)
+    activo = db.Column(db.Boolean, default=True)
 
-    clientes = db.relationship("Cliente", back_populates="cobrador", lazy="dynamic")
-
-    def set_password(self, password: str) -> None:
-        self.password_hash = bcrypt.hash(password)
+    def set_password(self, password: str):
+        self.password_hash = generate_password_hash(password)
 
     def check_password(self, password: str) -> bool:
-        return bcrypt.verify(password, self.password_hash)
+        return check_password_hash(self.password_hash, password)
 
 
 class Cliente(db.Model):
-    __tablename__ = "cliente"
+    __tablename__ = "clientes"
 
     id = db.Column(db.Integer, primary_key=True)
     nombre = db.Column(db.String(120), nullable=False)
-    identificacion = db.Column(db.String(50))
-    telefono = db.Column(db.String(50))
-    activo = db.Column(db.Boolean, default=True)
-
-    cobrador_id = db.Column(db.Integer, db.ForeignKey("user.id"))
-    cobrador = db.relationship("User", back_populates="clientes")
+    telefono = db.Column(db.String(50), nullable=True)
+    saldo = db.Column(db.Numeric(12, 2), default=0)
 
     movimientos = db.relationship(
-        "Movimiento",
-        back_populates="cliente",
-        lazy="dynamic",
-        cascade="all, delete-orphan",
+        "Movimiento", backref="cliente", lazy=True, cascade="all, delete-orphan"
     )
-
-    @property
-    def total_creditos(self) -> Decimal:
-        total = (
-            self.movimientos.filter_by(tipo="COMPRA")
-            .with_entities(db.func.coalesce(db.func.sum(Movimiento.monto), 0))
-            .scalar()
-        )
-        return Decimal(str(total or 0))
-
-    @property
-    def total_abonos(self) -> Decimal:
-        total = (
-            self.movimientos.filter_by(tipo="ABONO")
-            .with_entities(db.func.coalesce(db.func.sum(Movimiento.monto), 0))
-            .scalar()
-        )
-        return Decimal(str(total or 0))
-
-    @property
-    def saldo(self) -> Decimal:
-        return self.total_creditos - self.total_abonos
 
 
 class Movimiento(db.Model):
-    __tablename__ = "movimiento"
+    __tablename__ = "movimientos"
 
     id = db.Column(db.Integer, primary_key=True)
-    cliente_id = db.Column(db.Integer, db.ForeignKey("cliente.id"), nullable=False)
+    cliente_id = db.Column(db.Integer, db.ForeignKey("clientes.id"), nullable=False)
+    tipo = db.Column(db.String(10), nullable=False)  # COMPRA o ABONO
+    monto = db.Column(db.Numeric(12, 2), nullable=False)
     fecha = db.Column(db.Date, nullable=False, default=date.today)
-    tipo = db.Column(db.String(10), nullable=False)  # COMPRA / ABONO
-    monto = db.Column(db.Numeric(10, 2), nullable=False)
-    descripcion = db.Column(db.String(255))
-
-    usuario_id = db.Column(db.Integer, db.ForeignKey("user.id"))
-    usuario = db.relationship("User")
-
-    cliente = db.relationship("Cliente", back_populates="movimientos")
+    descripcion = db.Column(db.String(255), nullable=True)
 
 
 # -------------------------------------------------------------------
-# LOGIN MANAGER
+# Login manager
 # -------------------------------------------------------------------
-
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    return Usuario.query.get(int(user_id))
 
 
 # -------------------------------------------------------------------
-# DECORADORES DE ROL
+# Decorador simple para exigir usuario activo
 # -------------------------------------------------------------------
+def login_required_activo(f):
+    from functools import wraps
 
-def admin_required(f):
     @wraps(f)
     @login_required
     def wrapper(*args, **kwargs):
-        if not current_user.is_authenticated or current_user.role != "admin":
-            flash("Solo el administrador puede acceder a esta sección.", "danger")
-            return redirect(url_for("index"))
+        if not current_user.activo:
+            logout_user()
+            flash("Tu usuario está inactivo. Contacta al administrador.", "danger")
+            return redirect(url_for("login"))
         return f(*args, **kwargs)
 
     return wrapper
 
 
 # -------------------------------------------------------------------
-# INICIALIZACIÓN DE DB Y USUARIO ADMIN
+# Rutas
 # -------------------------------------------------------------------
+@app.route("/")
+@login_required_activo
+def index():
+    total_clientes = Cliente.query.count()
+    total_usuarios = Usuario.query.count()
+    total_saldo = db.session.query(db.func.coalesce(db.func.sum(Cliente.saldo), 0)).scalar()
 
-def init_db():
-    """Crea tablas y usuario admin si no existen."""
+    return render_template(
+        "index.html",
+        total_clientes=total_clientes,
+        total_usuarios=total_usuarios,
+        total_saldo=total_saldo,
+    )
+
+
+# ---------------------- LOGIN / LOGOUT ------------------------------
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+
+    if request.method == "POST":
+        username = request.form["username"].strip()
+        password = request.form["password"].strip()
+
+        usuario = Usuario.query.filter_by(username=username).first()
+        if usuario and usuario.check_password(password) and usuario.activo:
+            login_user(usuario)
+            flash("Bienvenido.", "success")
+            next_page = request.args.get("next")
+            return redirect(next_page or url_for("index"))
+        else:
+            flash("Usuario o contraseña incorrectos, o usuario inactivo.", "danger")
+
+    return render_template("login.html")
+
+
+@app.route("/logout")
+@login_required_activo
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
+
+
+# -------------------------- CLIENTES -------------------------------
+@app.route("/clientes", methods=["GET", "POST"])
+@login_required_activo
+def clientes():
+    if request.method == "POST":
+        nombre = request.form["nombre"].strip()
+        telefono = request.form.get("telefono", "").strip()
+
+        if not nombre:
+            flash("El nombre del cliente es obligatorio.", "danger")
+        else:
+            cliente = Cliente(nombre=nombre, telefono=telefono)
+            db.session.add(cliente)
+            db.session.commit()
+            flash("Cliente creado correctamente.", "success")
+            return redirect(url_for("clientes"))
+
+    clientes_list = Cliente.query.order_by(Cliente.nombre).all()
+    return render_template("clientes.html", clientes=clientes_list)
+
+
+@app.route("/clientes/<int:cliente_id>", methods=["GET", "POST"])
+@login_required_activo
+def cliente_detalle(cliente_id):
+    cliente = Cliente.query.get_or_404(cliente_id)
+
+    if request.method == "POST":
+        tipo = request.form["tipo"]
+        monto_str = request.form["monto"]
+        fecha_str = request.form.get("fecha") or date.today().isoformat()
+        descripcion = request.form.get("descripcion", "").strip()
+
+        try:
+            monto = Decimal(monto_str)
+        except Exception:
+            flash("Monto inválido.", "danger")
+            return redirect(url_for("cliente_detalle", cliente_id=cliente.id))
+
+        fecha_mov = date.fromisoformat(fecha_str)
+
+        mov = Movimiento(
+            cliente_id=cliente.id,
+            tipo=tipo,
+            monto=monto,
+            fecha=fecha_mov,
+            descripcion=descripcion or None,
+        )
+        db.session.add(mov)
+
+        # Actualizar saldo del cliente
+        if tipo == "COMPRA":
+            cliente.saldo = (cliente.saldo or 0) + monto
+        else:  # ABONO
+            cliente.saldo = (cliente.saldo or 0) - monto
+
+        db.session.commit()
+        flash("Movimiento registrado correctamente.", "success")
+        return redirect(url_for("cliente_detalle", cliente_id=cliente.id))
+
+    movimientos = (
+        Movimiento.query.filter_by(cliente_id=cliente.id)
+        .order_by(Movimiento.fecha.desc(), Movimiento.id.desc())
+        .all()
+    )
+
+    return render_template(
+        "cliente_detalle.html",
+        cliente=cliente,
+        movimientos=movimientos,
+        date=date,  # para usar date.today en el template
+    )
+
+
+@app.route("/clientes/<int:cliente_id>/pdf")
+@login_required_activo
+def cliente_pdf(cliente_id):
+    cliente = Cliente.query.get_or_404(cliente_id)
+    movimientos = (
+        Movimiento.query.filter_by(cliente_id=cliente.id)
+        .order_by(Movimiento.fecha)
+        .all()
+    )
+
+    pdf_path = f"/tmp/cliente_{cliente.id}.pdf"
+    c = canvas.Canvas(pdf_path, pagesize=letter)
+    width, height = letter
+
+    # Logo
+    logo_path = os.path.join(app.root_path, "static", "ibafuco_logo.jpg")
+    if os.path.exists(logo_path):
+        c.drawImage(
+            logo_path,
+            40,
+            height - 120,
+            width=120,
+            height=80,
+            preserveAspectRatio=True,
+            mask="auto",
+        )
+
+    y = height - 140
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(40, y, f"Estado de cuenta - {cliente.nombre}")
+    y -= 20
+
+    c.setFont("Helvetica", 11)
+    c.drawString(40, y, f"Teléfono: {cliente.telefono or 'No registrado'}")
+    y -= 20
+    c.drawString(40, y, f"Saldo actual: ₡{cliente.saldo:.2f}")
+    y -= 30
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, "Movimientos:")
+    y -= 20
+
+    c.setFont("Helvetica", 10)
+    for mov in movimientos:
+        if y < 50:
+            c.showPage()
+            y = height - 50
+            c.setFont("Helvetica", 10)
+
+        tipo = "COMPRA" if mov.tipo == "COMPRA" else "ABONO"
+        linea = (
+            f"{mov.fecha.strftime('%d/%m/%Y')} - {tipo} - "
+            f"₡{mov.monto:.2f} - {mov.descripcion or ''}"
+        )
+        c.drawString(40, y, linea)
+        y -= 15
+
+    c.showPage()
+    c.save()
+
+    return send_file(
+        pdf_path,
+        as_attachment=True,
+        download_name=f"cliente_{cliente.nombre}.pdf",
+    )
+
+
+# -------------------------- USUARIOS -------------------------------
+@app.route("/usuarios", methods=["GET", "POST"])
+@login_required_activo
+def usuarios():
+    if not current_user.es_admin:
+        abort(403)
+
+    if request.method == "POST":
+        username = request.form["username"].strip()
+        password = request.form["password"].strip()
+        es_admin = bool(request.form.get("es_admin"))
+
+        if not username or not password:
+            flash("Usuario y contraseña son obligatorios.", "danger")
+        elif Usuario.query.filter_by(username=username).first():
+            flash("Ya existe un usuario con ese nombre.", "danger")
+        else:
+            u = Usuario(username=username, es_admin=es_admin, activo=True)
+            u.set_password(password)
+            db.session.add(u)
+            db.session.commit()
+            flash("Usuario creado correctamente.", "success")
+            return redirect(url_for("usuarios"))
+
+    usuarios_list = Usuario.query.order_by(Usuario.username).all()
+    return render_template("usuarios_list.html", usuarios=usuarios_list)
+
+
+@app.route("/usuarios/<int:usuario_id>/toggle", methods=["POST"])
+@login_required_activo
+def toggle_usuario(usuario_id):
+    if not current_user.es_admin:
+        abort(403)
+
+    u = Usuario.query.get_or_404(usuario_id)
+    if u.id == current_user.id and u.es_admin:
+        flash("No puedes desactivar tu propio usuario admin.", "danger")
+    else:
+        u.activo = not u.activo
+        db.session.commit()
+        flash("Estado de usuario actualizado.", "success")
+
+    return redirect(url_for("usuarios"))
+
+
+@app.route("/usuarios/<int:usuario_id>/reset_password", methods=["POST"])
+@login_required_activo
+def reset_password(usuario_id):
+    if not current_user.es_admin:
+        abort(403)
+
+    u = Usuario.query.get_or_404(usuario_id)
+    nueva = "123456"
+    u.set_password(nueva)
+    db.session.commit()
+    flash(
+        f"Contraseña de {u.username} restablecida a: {nueva}. "
+        "Pídele que la cambie al ingresar.",
+        "warning",
+    )
+    return redirect(url_for("usuarios"))
+
+
+# ------------------ CAMBIAR PASSWORD (usuario actual) --------------
+@app.route("/cambiar_password", methods=["GET", "POST"])
+@login_required_activo
+def cambiar_password():
+    if request.method == "POST":
+        actual = request.form["actual"]
+        nueva = request.form["nueva"]
+        confirmar = request.form["confirmar"]
+
+        if not current_user.check_password(actual):
+            flash("La contraseña actual no es correcta.", "danger")
+        elif nueva != confirmar:
+            flash("La nueva contraseña y la confirmación no coinciden.", "danger")
+        elif len(nueva) < 6:
+            flash("La nueva contraseña debe tener al menos 6 caracteres.", "danger")
+        else:
+            current_user.set_password(nueva)
+            db.session.commit()
+            flash("Contraseña actualizada correctamente.", "success")
+            return redirect(url_for("index"))
+
+    return render_template("cambiar_password.html")
+
+
+# -------------------------------------------------------------------
+# Crear admin al inicio si no existe
+# -------------------------------------------------------------------
+def crear_admin_si_no_existe():
     with app.app_context():
         db.create_all()
-        admin = User.query.filter_by(username="admin").first()
+        admin = Usuario.query.filter_by(username="admin").first()
         if not admin:
-            admin = User(
-                username="admin",
-                full_name="Administrador",
-                role="admin",
-                active=True,
-            )
+            admin = Usuario(username="admin", es_admin=True, activo=True)
             admin.set_password("admin123")
             db.session.add(admin)
             db.session.commit()
@@ -178,474 +405,13 @@ def init_db():
             print("✅ Usuario admin ya existe")
 
 
-init_db()
+crear_admin_si_no_existe()
 
 
 # -------------------------------------------------------------------
-# RUTAS DE AUTENTICACIÓN
+# Para desarrollo local
 # -------------------------------------------------------------------
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if current_user.is_authenticated:
-        return redirect(url_for("index"))
-
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "").strip()
-
-        user = User.query.filter_by(username=username).first()
-        if not user:
-            flash("Usuario o contraseña incorrectos.", "danger")
-            return render_template("login.html")
-
-        if not user.active:
-            flash("Este usuario está inactivo. Contacte al administrador.", "danger")
-            return render_template("login.html")
-
-        if not user.check_password(password):
-            flash("Usuario o contraseña incorrectos.", "danger")
-            return render_template("login.html")
-
-        login_user(user)
-        flash(f"Bienvenido, {user.full_name}", "success")
-        return redirect(url_for("index"))
-
-    return render_template("login.html")
-
-
-@app.route("/logout")
-@login_required
-def logout():
-    logout_user()
-    flash("Sesión cerrada correctamente.", "info")
-    return redirect(url_for("login"))
-
-
-# -------------------------------------------------------------------
-# DASHBOARD PRINCIPAL
-# -------------------------------------------------------------------
-
-@app.route("/")
-@login_required
-def index():
-    clientes = Cliente.query.filter_by(activo=True).all()
-    total_deuda = sum((c.saldo for c in clientes), Decimal("0"))
-
-    # Top 10 deudores (solo con saldo > 0)
-    clientes_con_saldo = [c for c in clientes if c.saldo > 0]
-    top10 = sorted(clientes_con_saldo, key=lambda c: c.saldo, reverse=True)[:10]
-
-    return render_template(
-        "index.html",
-        total_deuda=total_deuda,
-        clientes=clientes,
-        top10=top10,
-    )
-
-
-# -------------------------------------------------------------------
-# CLIENTES / COMPRADORES
-# -------------------------------------------------------------------
-
-@app.route("/clientes", methods=["GET", "POST"])
-@login_required
-def clientes():
-    if request.method == "POST":
-        nombre = request.form.get("nombre", "").strip()
-        identificacion = request.form.get("identificacion", "").strip()
-        telefono = request.form.get("telefono", "").strip()
-
-        if not nombre:
-            flash("El nombre del cliente es obligatorio.", "danger")
-            return redirect(url_for("clientes"))
-
-        cliente = Cliente(
-            nombre=nombre,
-            identificacion=identificacion or None,
-            telefono=telefono or None,
-            cobrador=current_user if current_user.role == "cobrador" else None,
-            activo=True,
-        )
-        db.session.add(cliente)
-        db.session.commit()
-        flash("Cliente creado correctamente.", "success")
-        return redirect(url_for("clientes"))
-
-    clientes_lista = Cliente.query.order_by(Cliente.nombre).all()
-    return render_template("clientes.html", clientes=clientes_lista)
-
-
-@app.route("/clientes/<int:cliente_id>", methods=["GET", "POST"])
-@login_required
-def cliente_detalle(cliente_id):
-    cliente = Cliente.query.get_or_404(cliente_id)
-
-    if request.method == "POST":
-        tipo = request.form.get("tipo")
-        monto_raw = request.form.get("monto", "").replace(",", ".")
-        descripcion = request.form.get("descripcion", "").strip()
-        fecha_str = request.form.get("fecha", "")
-
-        if not tipo or tipo not in ("COMPRA", "ABONO"):
-            flash("Tipo de movimiento inválido.", "danger")
-            return redirect(url_for("cliente_detalle", cliente_id=cliente.id))
-
-        try:
-            monto = Decimal(monto_raw)
-        except Exception:
-            flash("Monto inválido.", "danger")
-            return redirect(url_for("cliente_detalle", cliente_id=cliente.id))
-
-        if monto <= 0:
-            flash("El monto debe ser mayor a 0.", "danger")
-            return redirect(url_for("cliente_detalle", cliente_id=cliente.id))
-
-        if fecha_str:
-            try:
-                fecha = datetime.strptime(fecha_str, "%Y-%m-%d").date()
-            except Exception:
-                fecha = date.today()
-        else:
-            fecha = date.today()
-
-        mov = Movimiento(
-            cliente=cliente,
-            fecha=fecha,
-            tipo=tipo,
-            monto=monto,
-            descripcion=descripcion or None,
-            usuario=current_user,
-        )
-        db.session.add(mov)
-        db.session.commit()
-        flash("Movimiento registrado correctamente.", "success")
-        return redirect(url_for("cliente_detalle", cliente_id=cliente.id))
-
-    movimientos = (
-        cliente.movimientos.order_by(Movimiento.fecha.desc(), Movimiento.id.desc()).all()
-    )
-    return render_template(
-        "cliente_detalle.html",
-        cliente=cliente,
-        movimientos=movimientos,
-    )
-
-
-# Alias para compatibilidad con tu navbar anterior
-@app.route("/movimientos")
-@login_required
-def registro_movimientos():
-    return redirect(url_for("clientes"))
-
-
-# -------------------------------------------------------------------
-# GESTIÓN DE USUARIOS (ADMIN)
-# -------------------------------------------------------------------
-
-@app.route("/usuarios", methods=["GET", "POST"])
-@admin_required
-def usuarios():
-    if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        full_name = request.form.get("full_name", "").strip()
-        password = request.form.get("password", "").strip()
-        role = request.form.get("role", "cobrador")
-
-        if not username or not full_name or not password:
-            flash("Todos los campos son obligatorios.", "danger")
-            return redirect(url_for("usuarios"))
-
-        if role not in ("admin", "cobrador"):
-            role = "cobrador"
-
-        existing = User.query.filter_by(username=username).first()
-        if existing:
-            flash("Ya existe un usuario con ese nombre.", "danger")
-            return redirect(url_for("usuarios"))
-
-        user = User(
-            username=username,
-            full_name=full_name,
-            role=role,
-            active=True,
-        )
-        user.set_password(password)
-        db.session.add(user)
-        db.session.commit()
-        flash("Usuario creado correctamente.", "success")
-        return redirect(url_for("usuarios"))
-
-    usuarios_lista = User.query.order_by(User.role.desc(), User.username).all()
-    return render_template("usuarios_list.html", usuarios=usuarios_lista)
-
-
-@app.route("/usuarios/<int:user_id>/toggle", methods=["POST"])
-@admin_required
-def usuario_toggle(user_id):
-    user = User.query.get_or_404(user_id)
-    if user.username == "admin":
-        flash("No puedes desactivar al usuario admin.", "danger")
-        return redirect(url_for("usuarios"))
-
-    user.active = not user.active
-    db.session.commit()
-    flash("Estado del usuario actualizado.", "success")
-    return redirect(url_for("usuarios"))
-
-
-# -------------------------------------------------------------------
-# REPORTES (SOLO ADMIN)
-# -------------------------------------------------------------------
-
-def _generar_pdf_cliente(cliente: Cliente) -> BytesIO:
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
-
-    # Logo (si existe static/logo.png)
-    logo_path = os.path.join(app.root_path, "static", "logo.png")
-    y = height - 60
-    if os.path.exists(logo_path):
-        try:
-            c.drawImage(logo_path, 40, y - 40, width=120, preserveAspectRatio=True, mask="auto")
-        except Exception:
-            pass
-
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(200, y, "Estado de Cuenta - Créditos")
-
-    y -= 60
-    c.setFont("Helvetica", 11)
-    c.drawString(40, y, f"Cliente: {cliente.nombre}")
-    y -= 15
-    if cliente.identificacion:
-        c.drawString(40, y, f"Identificación: {cliente.identificacion}")
-        y -= 15
-    if cliente.telefono:
-        c.drawString(40, y, f"Teléfono: {cliente.telefono}")
-        y -= 15
-    if cliente.cobrador:
-        c.drawString(40, y, f"Cobrador: {cliente.cobrador.full_name}")
-        y -= 15
-
-    y -= 10
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Fecha")
-    c.drawString(120, y, "Tipo")
-    c.drawString(200, y, "Monto")
-    c.drawString(280, y, "Descripción")
-    y -= 10
-    c.line(40, y, width - 40, y)
-    y -= 10
-
-    c.setFont("Helvetica", 10)
-    saldo = Decimal("0")
-
-    movimientos = (
-        cliente.movimientos.order_by(Movimiento.fecha.asc(), Movimiento.id.asc()).all()
-    )
-    for mov in movimientos:
-        if y < 80:
-            c.showPage()
-            y = height - 80
-            c.setFont("Helvetica", 10)
-
-        fecha_txt = mov.fecha.strftime("%d/%m/%Y")
-        c.drawString(40, y, fecha_txt)
-        c.drawString(120, y, "COMPRA" if mov.tipo == "COMPRA" else "ABONO")
-        c.drawRightString(260, y, f"{mov.monto:,.2f}")
-        if mov.descripcion:
-            c.drawString(280, y, mov.descripcion[:50])
-
-        if mov.tipo == "COMPRA":
-            saldo += Decimal(str(mov.monto))
-        else:
-            saldo -= Decimal(str(mov.monto))
-
-        y -= 15
-
-    y -= 10
-    c.setFont("Helvetica-Bold", 11)
-    c.drawRightString(260, y, "Saldo final:")
-    c.drawRightString(360, y, f"{cliente.saldo:,.2f}")
-
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer
-
-
-@app.route("/clientes/<int:cliente_id>/pdf")
-@admin_required
-def cliente_pdf(cliente_id):
-    cliente = Cliente.query.get_or_404(cliente_id)
-    pdf_buffer = _generar_pdf_cliente(cliente)
-    filename = f"estado_{cliente.nombre.replace(' ', '_')}.pdf"
-    return send_file(
-        pdf_buffer,
-        as_attachment=True,
-        download_name=filename,
-        mimetype="application/pdf",
-    )
-
-
-def _generar_pdf_global(clientes) -> BytesIO:
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
-
-    logo_path = os.path.join(app.root_path, "static", "logo.png")
-    y = height - 60
-    if os.path.exists(logo_path):
-        try:
-            c.drawImage(logo_path, 40, y - 40, width=120, preserveAspectRatio=True, mask="auto")
-        except Exception:
-            pass
-
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(200, y, "Reporte Global de Deudas")
-    y -= 40
-
-    total_deuda = sum((ccli.saldo for ccli in clientes), Decimal("0"))
-    c.setFont("Helvetica", 11)
-    c.drawString(40, y, f"Total adeudado entre todos los clientes: {total_deuda:,.2f}")
-    y -= 25
-
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Cliente")
-    c.drawRightString(260, y, "Saldo")
-    y -= 10
-    c.line(40, y, width - 40, y)
-    y -= 10
-    c.setFont("Helvetica", 10)
-
-    for cliente in clientes:
-        if y < 80:
-            c.showPage()
-            y = height - 80
-            c.setFont("Helvetica", 10)
-        c.drawString(40, y, cliente.nombre[:40])
-        c.drawRightString(260, y, f"{cliente.saldo:,.2f}")
-        y -= 15
-
-    # Top 10
-    clientes_con_saldo = [ccli for ccli in clientes if ccli.saldo > 0]
-    top10 = sorted(clientes_con_saldo, key=lambda ccli: ccli.saldo, reverse=True)[:10]
-
-    y -= 10
-    if y < 120:
-        c.showPage()
-        y = height - 80
-
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(40, y, "TOP 10 CLIENTES QUE MÁS DEBEN")
-    y -= 20
-
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Posición")
-    c.drawString(120, y, "Cliente")
-    c.drawRightString(260, y, "Saldo")
-    y -= 10
-    c.line(40, y, width - 40, y)
-    y -= 10
-    c.setFont("Helvetica", 10)
-
-    for idx, cliente in enumerate(top10, start=1):
-        if y < 80:
-            c.showPage()
-            y = height - 80
-            c.setFont("Helvetica", 10)
-
-        c.drawString(40, y, str(idx))
-        c.drawString(120, y, cliente.nombre[:40])
-        c.drawRightString(260, y, f"{cliente.saldo:,.2f}")
-        y -= 15
-
-    c.showPage()
-    c.save()
-    buffer.seek(0)
-    return buffer
-
-
-@app.route("/reportes")
-@admin_required
-def reportes():
-    clientes = Cliente.query.filter_by(activo=True).all()
-    total_deuda = sum((c.saldo for c in clientes), Decimal("0"))
-    clientes_con_saldo = [c for c in clientes if c.saldo > 0]
-    top10 = sorted(clientes_con_saldo, key=lambda c: c.saldo, reverse=True)[:10]
-
-    return render_template(
-        "reportes.html",
-        total_deuda=total_deuda,
-        clientes=clientes,
-        top10=top10,
-    )
-
-
-@app.route("/reportes/global_pdf")
-@admin_required
-def reporte_global_pdf():
-    clientes = Cliente.query.filter_by(activo=True).all()
-    pdf_buffer = _generar_pdf_global(clientes)
-    return send_file(
-        pdf_buffer,
-        as_attachment=True,
-        download_name="reporte_global.pdf",
-        mimetype="application/pdf",
-    )
-
-
-@app.route("/reportes/global_excel")
-@admin_required
-def reporte_global_excel():
-    from openpyxl import Workbook
-
-    clientes = Cliente.query.filter_by(activo=True).all()
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Deudas"
-
-    ws.append(["Cliente", "Identificación", "Teléfono", "Saldo"])
-
-    for cliente in clientes:
-        ws.append(
-            [
-                cliente.nombre,
-                cliente.identificacion or "",
-                cliente.telefono or "",
-                float(cliente.saldo),
-            ]
-        )
-
-    # Hoja de Top 10
-    clientes_con_saldo = [c for c in clientes if c.saldo > 0]
-    top10 = sorted(clientes_con_saldo, key=lambda c: c.saldo, reverse=True)[:10]
-
-    ws2 = wb.create_sheet(title="Top 10 Deudores")
-    ws2.append(["Posición", "Cliente", "Saldo"])
-
-    for idx, cliente in enumerate(top10, start=1):
-        ws2.append([idx, cliente.nombre, float(cliente.saldo)])
-
-    buffer = BytesIO()
-    wb.save(buffer)
-    buffer.seek(0)
-
-    return send_file(
-        buffer,
-        as_attachment=True,
-        download_name="reporte_global.xlsx",
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-
-# -------------------------------------------------------------------
-# MAIN
-# -------------------------------------------------------------------
-
 if __name__ == "__main__":
     app.run(debug=True)
+
 
